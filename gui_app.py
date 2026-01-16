@@ -5,7 +5,7 @@
 """
 
 # 版本信息
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.0.1"
 GITHUB_REPO = "stokisai/ImageProcessingTool"
 UPDATE_CHECK_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
