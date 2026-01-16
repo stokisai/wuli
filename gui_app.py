@@ -6,7 +6,7 @@
 
 # 版本信息
 APP_VERSION = "1.2.0"
-GITHUB_REPO = "yingbei-tian/ImageProcessingTool"
+GITHUB_REPO = "stokisai/ImageProcessingTool"
 UPDATE_CHECK_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 import sys
