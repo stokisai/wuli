@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+process.log
+
+# Sensitive files
+token.pickle
+credentials.json
+client_secret.json
+
+# Temporary files
+temp_processed/
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# PyInstaller
+*.spec
+
+# Output files
+final_report.xlsx
+发布版/

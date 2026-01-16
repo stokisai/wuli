@@ -1,0 +1,13 @@
+pandas
+openpyxl
+Pillow
+google-api-python-client
+google-auth-oauthlib
+easyocr
+opencv-contrib-python
+fuzzywuzzy
+python-Levenshtein
+deep-translator
+ultralytics
+PyQt5>=5.15
+pyinstaller
