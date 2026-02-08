@@ -5,7 +5,7 @@ import logging
 import time
 from datetime import datetime
 from image_processor import ImageProcessor
-from drive_uploader import DriveUploader
+from oss_uploader import OSSUploader
 from comfyui_client import ComfyUIClient
 from utils import setup_logging, ensure_dir, check_and_download_font
 
@@ -34,11 +34,11 @@ def main():
 
     # Initialize Modules
     processor = ImageProcessor()
-    uploader = DriveUploader()
+    uploader = OSSUploader()
     
     # Try auth
     if not uploader.authenticate():
-        logger.warning("Google Drive authentication failed or skipped. Uploads will fail.")
+        logger.warning("阿里云 OSS 认证失败，上传功能将不可用。")
     
     try:
         df_tasks = pd.read_excel(input_task_file)
@@ -229,17 +229,19 @@ def main():
     logger.info("阶段1: ComfyUI 图生图处理")
     logger.info("="*60)
     
-    # 从第一个任务获取全局ComfyUI配置
-    global_comfyui_url = None
+    # 从 config.ini 获取全局 ComfyUI 配置
+    comfyui_host = config.get("ComfyUI", "Host", fallback="127.0.0.1")
+    comfyui_port = config.get("ComfyUI", "DefaultPort", fallback="8188")
+    global_comfyui_url = f"http://{comfyui_host}:{comfyui_port}"
+
     global_stage1_dir = None
     for task in all_tasks:
-        if task['comfyui_url'] and task['stage1_dir']:
-            global_comfyui_url = task['comfyui_url']
+        if task['stage1_dir']:
             global_stage1_dir = task['stage1_dir']
             break
-    
-    if not global_comfyui_url or not global_stage1_dir:
-        logger.error("未找到ComfyUI配置！请确保Excel第一行配置了 comfyui 和 Processed image 1stage 列")
+
+    if not global_stage1_dir:
+        logger.error("未找到输出目录配置！请确保Excel中配置了 Processed image 1stage 列")
         return
     
     logger.info(f"ComfyUI服务器: {global_comfyui_url}")

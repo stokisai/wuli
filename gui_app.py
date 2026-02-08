@@ -1,13 +1,12 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 图片处理工具 GUI - v1.2.0
 为客户提供简单易用的图片处理工具
 """
 
 # 版本信息
-APP_VERSION = "1.0.1"
-GITHUB_REPO = "stokisai/ImageProcessingTool"
-UPDATE_CHECK_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+APP_VERSION = "1.0.2"
+GITHUB_REPO = "stokisai/wuli"
 
 import sys
 import os
@@ -16,14 +15,15 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from PyQt5.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QTableWidget, QTableWidgetItem,
     QProgressBar, QTextEdit, QFrame, QSplitter, QMessageBox,
-    QHeaderView, QGroupBox, QSizePolicy, QScrollArea, QCheckBox
+    QHeaderView, QGroupBox, QSizePolicy, QScrollArea, QCheckBox,
+    QStackedWidget, QLineEdit
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer
-from PyQt5.QtGui import QFont, QColor, QPalette, QDesktopServices, QIcon, QBrush
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QObject
+from PySide6.QtGui import QFont, QColor, QPalette, QDesktopServices, QIcon, QBrush, QTextCursor
 
 import pandas as pd
 import configparser
@@ -35,52 +35,27 @@ from image_processor import ImageProcessor
 from drive_uploader import DriveUploader
 from comfyui_client import ComfyUIClient
 from utils import setup_logging, ensure_dir
+from updater import UpdateCheckWorker, UpdateDialog
 
 # 设置日志
 logger = setup_logging()
 
 
-def check_update(parent_window):
-    """检查是否有新版本可用"""
-    try:
-        response = requests.get(UPDATE_CHECK_URL, timeout=5)
-        if response.status_code != 200:
-            return
-        
-        data = response.json()
-        latest_version = data.get("tag_name", "").lstrip("v")
-        download_url = data.get("html_url", "")
-        
-        # 比较版本号
-        if latest_version and latest_version > APP_VERSION:
-            reply = QMessageBox.question(
-                parent_window,
-                "发现新版本",
-                f"发现新版本 v{latest_version}！\n当前版本: v{APP_VERSION}\n\n是否前往下载？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes
-            )
-            if reply == QMessageBox.Yes:
-                QDesktopServices.openUrl(QUrl(download_url))
-    except Exception as e:
-        # 静默失败，不影响正常使用
-        logger.debug(f"检查更新失败: {e}")
-
-
 class WorkerThread(QThread):
     """后台工作线程"""
-    progress_updated = pyqtSignal(int, int, str)  # current, total, message
-    log_message = pyqtSignal(str)  # 日志消息
-    result_added = pyqtSignal(str, str, str, str)  # folder, filename, status, output_path
-    stage_completed = pyqtSignal(str, str, bool)  # stage_name, output_dir, success
-    error_occurred = pyqtSignal(str)  # error message
-    report_saved = pyqtSignal(str)  # report file path
+    progress_updated = Signal(int, int, str)  # current, total, message
+    log_message = Signal(str)  # 日志消息
+    result_added = Signal(str, str, str, str)  # folder, filename, status, output_path
+    stage_completed = Signal(str, str, bool)  # stage_name, output_dir, success
+    error_occurred = Signal(str)  # error message
+    report_saved = Signal(str)  # report file path
     
-    def __init__(self, mode, task_file, manual_stage2_dir=None, parent=None):
+    def __init__(self, mode, task_file, manual_stage2_dir=None, comfyui_url=None, parent=None):
         super().__init__(parent)
         self.mode = mode  # 'stage1', 'stage2', 'full_auto', 'manual_stage2'
         self.task_file = task_file
         self.manual_stage2_dir = manual_stage2_dir  # 手动阶段2的输入目录
+        self.comfyui_url = comfyui_url  # 全局 ComfyUI 地址
         self.stage1_results = {}
         self.stage1_output_dir = None
         self.should_stop = False
@@ -140,7 +115,6 @@ class WorkerThread(QThread):
                         'source_path': img_path,
                         'img_name': os.path.basename(img_path),
                         'folder_rel_path': folder_rel,
-                        'comfyui_url': str(row_data.get('comfyui', '')) if pd.notna(row_data.get('comfyui')) else None,
                         'stage1_dir': str(row_data.get('Processed image 1stage', '')) if pd.notna(row_data.get('Processed image 1stage')) else None,
                         'jp_top': str(row_data.get('Top Text JP', '')) if pd.notna(row_data.get('Top Text JP')) else '',
                         'jp_bottom': str(row_data.get('Bottom Text JP', '')) if pd.notna(row_data.get('Bottom Text JP')) else '',
@@ -151,7 +125,6 @@ class WorkerThread(QThread):
                     
                     if task_info['jp_top'].lower() == 'nan': task_info['jp_top'] = ''
                     if task_info['jp_bottom'].lower() == 'nan': task_info['jp_bottom'] = ''
-                    if task_info['comfyui_url'] and task_info['comfyui_url'].lower() == 'nan': task_info['comfyui_url'] = None
                     if task_info['stage1_dir'] and task_info['stage1_dir'].lower() == 'nan': task_info['stage1_dir'] = None
                     
                     all_tasks.append(task_info)
@@ -160,17 +133,19 @@ class WorkerThread(QThread):
             self.error_occurred.emit("未找到任何有效任务!")
             return
             
-        # 获取全局配置
-        global_comfyui_url = None
+        # 使用全局 ComfyUI 地址
+        global_comfyui_url = self.comfyui_url
         global_stage1_dir = None
         for task in all_tasks:
-            if task['comfyui_url'] and task['stage1_dir']:
-                global_comfyui_url = task['comfyui_url']
+            if task['stage1_dir']:
                 global_stage1_dir = task['stage1_dir']
                 break
-        
-        if not global_comfyui_url or not global_stage1_dir:
-            self.error_occurred.emit("未找到ComfyUI配置！请确保Excel中配置了 comfyui 和 Processed image 1stage 列")
+
+        if not global_comfyui_url:
+            self.error_occurred.emit("未配置 ComfyUI 地址！请在「配置」页面设置 ComfyUI 全局端口")
+            return
+        if not global_stage1_dir:
+            self.error_occurred.emit("未找到输出目录配置！请确保Excel中配置了 Processed image 1stage 列")
             return
         
         self.stage1_output_dir = global_stage1_dir
@@ -484,6 +459,44 @@ class WorkerThread(QThread):
         self.should_stop = True
 
 
+class LogSignalBridge(QObject):
+    """Bridge Python logging to Qt UI thread."""
+    message = Signal(str)
+
+
+class GuiLogHandler(logging.Handler):
+    """Logging handler forwarding formatted logs to Qt signal."""
+
+    def __init__(self, bridge: LogSignalBridge):
+        super().__init__()
+        self.bridge = bridge
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+        except Exception:
+            msg = record.getMessage()
+        self.bridge.message.emit(msg)
+
+
+class ComfyUIConnectionTestWorker(QThread):
+    """ComfyUI connection test worker."""
+    check_finished = Signal(bool, str, str)  # ok, tested_url, message
+
+    def __init__(self, url, parent=None):
+        super().__init__(parent)
+        self.url = url
+
+    def run(self):
+        try:
+            client = ComfyUIClient.from_url(self.url)
+            if client.check_connection():
+                self.check_finished.emit(True, self.url, "连接成功，ComfyUI 服务可用")
+            else:
+                self.check_finished.emit(False, self.url, "连接失败，请确认地址、端口和 ComfyUI 服务状态")
+        except Exception as e:
+            self.check_finished.emit(False, self.url, f"连接异常: {e}")
+
 class MainWindow(QMainWindow):
     """主窗口"""
     
@@ -493,146 +506,190 @@ class MainWindow(QMainWindow):
         self.task_file = None
         self.current_output_dir = None
         self.report_file = None
+        self._update_checker = None
+        self._comfyui_test_worker = None
+        self._comfyui_test_ok = False
+        self._comfyui_tested_url = ""
         self.init_ui()
-        
-        # 启动后延迟2秒检查更新，不影响UI加载
-        QTimer.singleShot(2000, lambda: check_update(self))
+
+        # 启动后延迟2秒自动检查更新
+        QTimer.singleShot(2000, self._check_for_updates)
         
     def init_ui(self):
-        """初始化界面"""
-        self.setWindowTitle(f"📷 图片处理工具 v{APP_VERSION}")
-        self.setMinimumSize(850, 650)
-        self.resize(950, 700)
-        
-        # 应用样式
-        self.apply_styles()
-        
-        # 主窗口部件
+        """Initialize UI with left sidebar navigation and right content area."""
+        self.setWindowTitle(f"\u56fe\u7247\u5904\u7406\u5de5\u5177 v{APP_VERSION}")
+        self.setMinimumSize(1024, 700)
+        self.resize(1200, 760)
+
         central_widget = QWidget()
+        central_widget.setObjectName("appRoot")
         self.setCentralWidget(central_widget)
-        
-        main_layout = QVBoxLayout(central_widget)
+
+        root_layout = QHBoxLayout(central_widget)
+        root_layout.setSpacing(12)
+        root_layout.setContentsMargins(12, 12, 12, 12)
+
+        self.sidebar = QFrame()
+        self.sidebar.setObjectName("sidebar")
+        self.sidebar.setFixedWidth(220)
+        sidebar_layout = QVBoxLayout(self.sidebar)
+        sidebar_layout.setSpacing(8)
+        sidebar_layout.setContentsMargins(12, 12, 12, 12)
+
+        sidebar_title = QLabel("\u56fe\u7247\u5904\u7406\u5de5\u5177")
+        sidebar_title.setObjectName("sidebarTitle")
+        sidebar_layout.addWidget(sidebar_title)
+
+        self.nav_tool_btn = QPushButton("\u56fe\u7247\u5904\u7406\u5de5\u5177")
+        self.nav_tool_btn.setObjectName("navButton")
+        self.nav_tool_btn.setCheckable(True)
+        self.nav_tool_btn.clicked.connect(lambda: self.switch_page(0))
+        sidebar_layout.addWidget(self.nav_tool_btn)
+
+        self.nav_info_btn = QPushButton("\u914d\u7f6e")
+        self.nav_info_btn.setObjectName("navButton")
+        self.nav_info_btn.setCheckable(True)
+        self.nav_info_btn.clicked.connect(lambda: self.switch_page(1))
+        sidebar_layout.addWidget(self.nav_info_btn)
+
+        sidebar_layout.addStretch()
+
+        version_label = QLabel(f"v{APP_VERSION}")
+        version_label.setObjectName("sidebarVersion")
+        version_label.setAlignment(Qt.AlignCenter)
+        sidebar_layout.addWidget(version_label)
+
+        self.update_check_btn = QPushButton("检查更新")
+        self.update_check_btn.setObjectName("updateCheckBtn")
+        self.update_check_btn.clicked.connect(self._check_for_updates)
+        sidebar_layout.addWidget(self.update_check_btn)
+
+        content_frame = QFrame()
+        content_frame.setObjectName("contentArea")
+        content_layout = QVBoxLayout(content_frame)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        self.page_stack = QStackedWidget()
+        self.page_stack.setObjectName("contentStack")
+        content_layout.addWidget(self.page_stack)
+
+        root_layout.addWidget(self.sidebar)
+        root_layout.addWidget(content_frame, 1)
+
+        tool_page = QWidget()
+        tool_page.setObjectName("toolPage")
+        main_layout = QVBoxLayout(tool_page)
         main_layout.setSpacing(12)
-        main_layout.setContentsMargins(20, 15, 20, 15)
-        
-        # 标题
-        title_label = QLabel("📷 图片处理工具")
-        title_label.setObjectName("titleLabel")
-        title_label.setAlignment(Qt.AlignCenter)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+
+        title_label = QLabel("\u56fe\u7247\u5904\u7406\u5de5\u5177")
+        title_label.setObjectName("pageTitle")
+        title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         main_layout.addWidget(title_label)
-        
-        # 文件选择区域
+
         file_layout = QHBoxLayout()
         file_layout.setSpacing(10)
-        
-        file_icon = QLabel("📁")
-        file_icon.setStyleSheet("font-size: 18px;")
+
+        file_icon = QLabel("\u4efb\u52a1\u6587\u4ef6")
+        file_icon.setObjectName("fileIcon")
         file_layout.addWidget(file_icon)
-        
-        self.file_label = QLabel("请选择Excel任务文件...")
+
+        self.file_label = QLabel("\u8bf7\u9009\u62e9 Excel \u4efb\u52a1\u6587\u4ef6...")
         self.file_label.setObjectName("fileLabel")
         self.file_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         file_layout.addWidget(self.file_label)
-        
-        browse_btn = QPushButton("浏览...")
+
+        browse_btn = QPushButton("\u6d4f\u89c8...")
         browse_btn.setObjectName("browseBtn")
         browse_btn.clicked.connect(self.browse_file)
         file_layout.addWidget(browse_btn)
-        
+
         main_layout.addLayout(file_layout)
-        
-        # 操作按钮区域 - 上排
+
         btn_layout1 = QHBoxLayout()
-        btn_layout1.setSpacing(15)
-        
-        self.stage1_btn = QPushButton("阶段1\nComfyUI处理")
+        btn_layout1.setSpacing(10)
+
+        self.stage1_btn = QPushButton("\u9636\u6bb51\nComfyUI \u5904\u7406")
         self.stage1_btn.setObjectName("stage1Btn")
-        self.stage1_btn.setMinimumHeight(55)
+        self.stage1_btn.setMinimumHeight(54)
         self.stage1_btn.clicked.connect(self.run_stage1)
         self.stage1_btn.setEnabled(False)
         btn_layout1.addWidget(self.stage1_btn)
-        
-        self.stage2_btn = QPushButton("阶段2\n添加文字")
+
+        self.stage2_btn = QPushButton("\u9636\u6bb52\n\u6dfb\u52a0\u6587\u5b57")
         self.stage2_btn.setObjectName("stage2Btn")
-        self.stage2_btn.setMinimumHeight(55)
+        self.stage2_btn.setMinimumHeight(54)
         self.stage2_btn.clicked.connect(self.run_stage2)
         self.stage2_btn.setEnabled(False)
         btn_layout1.addWidget(self.stage2_btn)
-        
-        self.auto_btn = QPushButton("全流程自动\n无需确认")
+
+        self.auto_btn = QPushButton("\u5168\u6d41\u7a0b\u81ea\u52a8\n\u65e0\u9700\u786e\u8ba4")
         self.auto_btn.setObjectName("autoBtn")
-        self.auto_btn.setMinimumHeight(55)
+        self.auto_btn.setProperty("primary", True)
+        self.auto_btn.setMinimumHeight(54)
         self.auto_btn.clicked.connect(self.run_full_auto)
         self.auto_btn.setEnabled(False)
         btn_layout1.addWidget(self.auto_btn)
-        
+
         main_layout.addLayout(btn_layout1)
-        
-        # 操作按钮区域 - 下排（手动阶段2）
+
         btn_layout2 = QHBoxLayout()
-        btn_layout2.setSpacing(15)
-        
         btn_layout2.addStretch()
-        
-        self.manual_stage2_btn = QPushButton("手动阶段2\n选择已有图片文件夹")
+
+        self.manual_stage2_btn = QPushButton("\u624b\u52a8\u9636\u6bb52\n\u9009\u62e9\u5df2\u6709\u56fe\u7247\u6587\u4ef6\u5939")
         self.manual_stage2_btn.setObjectName("manualStage2Btn")
-        self.manual_stage2_btn.setMinimumHeight(45)
-        self.manual_stage2_btn.setMinimumWidth(200)
+        self.manual_stage2_btn.setMinimumHeight(44)
+        self.manual_stage2_btn.setMinimumWidth(220)
         self.manual_stage2_btn.clicked.connect(self.run_manual_stage2)
         self.manual_stage2_btn.setEnabled(False)
         btn_layout2.addWidget(self.manual_stage2_btn)
-        
+
         btn_layout2.addStretch()
-        
         main_layout.addLayout(btn_layout2)
-        
-        # 进度条和状态
+
         progress_layout = QHBoxLayout()
-        
-        # 运行状态指示器
-        self.running_indicator = QLabel("●")
+
+        self.running_indicator = QLabel("o")
         self.running_indicator.setObjectName("runningIndicator")
-        self.running_indicator.setFixedWidth(25)
+        self.running_indicator.setFixedWidth(20)
         self.running_indicator.setVisible(False)
         progress_layout.addWidget(self.running_indicator)
-        
-        # 动画计时器
+
         self.indicator_timer = QTimer()
         self.indicator_timer.timeout.connect(self.animate_indicator)
-        self.indicator_colors = ["#22c55e", "#4ade80", "#86efac", "#4ade80"]
+        self.indicator_colors = ["#9aa4af"]
         self.indicator_index = 0
-        
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setObjectName("progressBar")
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("%p%")
         self.progress_bar.setMinimumHeight(22)
-        progress_layout.addWidget(self.progress_bar)
-        
-        self.status_label = QLabel("等待开始...")
+        progress_layout.addWidget(self.progress_bar, 1)
+
+        self.status_label = QLabel("\u7b49\u5f85\u5f00\u59cb...")
         self.status_label.setObjectName("statusLabel")
         self.status_label.setMinimumWidth(200)
         progress_layout.addWidget(self.status_label)
-        
-        # 停止按钮
-        self.stop_btn = QPushButton("⏹ 停止")
+
+        self.stop_btn = QPushButton("\u505c\u6b62")
         self.stop_btn.setObjectName("stopBtn")
         self.stop_btn.setFixedWidth(70)
         self.stop_btn.clicked.connect(self.stop_processing)
         self.stop_btn.setVisible(False)
         progress_layout.addWidget(self.stop_btn)
-        
+
         main_layout.addLayout(progress_layout)
-        
-        # 处理结果表格
-        result_label = QLabel("📋 处理结果")
+
+        result_label = QLabel("\u5904\u7406\u7ed3\u679c")
         result_label.setObjectName("sectionLabel")
         main_layout.addWidget(result_label)
-        
+
         self.result_table = QTableWidget()
         self.result_table.setObjectName("resultTable")
         self.result_table.setColumnCount(4)
-        self.result_table.setHorizontalHeaderLabels(["序号", "文件", "状态", "输出/链接"])
+        self.result_table.setHorizontalHeaderLabels(["\u5e8f\u53f7", "\u6587\u4ef6", "\u72b6\u6001", "\u8f93\u51fa/\u94fe\u63a5"])
         self.result_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         self.result_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.result_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
@@ -642,262 +699,298 @@ class MainWindow(QMainWindow):
         self.result_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.result_table.verticalHeader().setVisible(False)
         main_layout.addWidget(self.result_table, 1)
-        
-        # 完成状态栏
+
         self.complete_frame = QFrame()
         self.complete_frame.setObjectName("completeFrame")
         self.complete_frame.setVisible(False)
         complete_layout = QHBoxLayout(self.complete_frame)
         complete_layout.setContentsMargins(15, 12, 15, 12)
-        
+
         complete_left = QVBoxLayout()
         self.complete_label = QLabel()
         self.complete_label.setObjectName("completeLabel")
         complete_left.addWidget(self.complete_label)
-        
+
         self.output_path_label = QLabel()
         self.output_path_label.setObjectName("outputPathLabel")
         complete_left.addWidget(self.output_path_label)
-        
+
         self.report_label = QLabel()
         self.report_label.setObjectName("reportLabel")
         complete_left.addWidget(self.report_label)
-        
+
         complete_layout.addLayout(complete_left)
         complete_layout.addStretch()
-        
+
         btn_layout = QVBoxLayout()
-        self.open_folder_btn = QPushButton("📂 打开输出文件夹")
+        self.open_folder_btn = QPushButton("\u6253\u5f00\u8f93\u51fa\u6587\u4ef6\u5939")
         self.open_folder_btn.setObjectName("openFolderBtn")
         self.open_folder_btn.clicked.connect(self.open_output_folder)
         btn_layout.addWidget(self.open_folder_btn)
-        
-        self.open_report_btn = QPushButton("📊 打开报告Excel")
+
+        self.open_report_btn = QPushButton("\u6253\u5f00\u62a5\u544a Excel")
         self.open_report_btn.setObjectName("openReportBtn")
         self.open_report_btn.clicked.connect(self.open_report)
         btn_layout.addWidget(self.open_report_btn)
-        
-        self.open_report_folder_btn = QPushButton("📁 打开报告文件夹")
+
+        self.open_report_folder_btn = QPushButton("\u6253\u5f00\u62a5\u544a\u76ee\u5f55")
         self.open_report_folder_btn.setObjectName("openReportFolderBtn")
         self.open_report_folder_btn.clicked.connect(self.open_report_folder)
         btn_layout.addWidget(self.open_report_folder_btn)
-        
+
         complete_layout.addLayout(btn_layout)
-        
+
         main_layout.addWidget(self.complete_frame)
-        
+
+        info_page = QWidget()
+        info_page.setObjectName("infoPage")
+        info_layout = QVBoxLayout(info_page)
+        info_layout.setContentsMargins(24, 24, 24, 24)
+        info_layout.setSpacing(10)
+
+        info_title = QLabel("\u914d\u7f6e")
+        info_title.setObjectName("pageTitle")
+        info_layout.addWidget(info_title)
+
+        # ComfyUI 全局端口设置
+        comfyui_group = QGroupBox("ComfyUI \u5168\u5c40\u7aef\u53e3")
+        comfyui_group.setObjectName("configGroup")
+        comfyui_form = QHBoxLayout(comfyui_group)
+        comfyui_form.setContentsMargins(12, 12, 12, 12)
+
+        comfyui_label = QLabel("ComfyUI 地址:")
+        comfyui_label.setObjectName("configLabel")
+        comfyui_form.addWidget(comfyui_label)
+
+        self.comfyui_url_input = QLineEdit()
+        self.comfyui_url_input.setObjectName("configInput")
+        self.comfyui_url_input.setMinimumHeight(36)
+        self.comfyui_url_input.setPlaceholderText("例如: https://example.com:8188")
+        self.comfyui_url_input.textChanged.connect(self._on_comfyui_url_changed)
+
+        # ? config.ini ?????
+        _, parser = self._read_runtime_config()
+        host = parser.get("ComfyUI", "Host", fallback="127.0.0.1")
+        port = parser.get("ComfyUI", "DefaultPort", fallback="8188")
+        scheme = "https" if port in ("443",) else "http"
+        self.comfyui_url_input.setText(f"{scheme}://{host}:{port}")
+        comfyui_form.addWidget(self.comfyui_url_input, 1)
+
+        self.test_comfyui_btn = QPushButton("测试连接")
+        self.test_comfyui_btn.setObjectName("testConfigBtn")
+        self.test_comfyui_btn.setMinimumHeight(36)
+        self.test_comfyui_btn.setMinimumWidth(92)
+        self.test_comfyui_btn.clicked.connect(self._test_comfyui_connection)
+        comfyui_form.addWidget(self.test_comfyui_btn)
+
+        self.save_comfyui_btn = QPushButton("保存")
+        self.save_comfyui_btn.setObjectName("saveConfigBtn")
+        self.save_comfyui_btn.setMinimumHeight(36)
+        self.save_comfyui_btn.setMinimumWidth(72)
+        self.save_comfyui_btn.setEnabled(False)
+        self.save_comfyui_btn.clicked.connect(self._save_comfyui_url)
+        comfyui_form.addWidget(self.save_comfyui_btn)
+
+        self.comfyui_status_label = QLabel("")
+        self.comfyui_status_label.setObjectName("configStatus")
+        self.comfyui_status_label.setWordWrap(True)
+        self.comfyui_status_label.setProperty("state", "pending")
+
+        info_layout.addWidget(comfyui_group)
+        info_layout.addWidget(self.comfyui_status_label)
+        self._on_comfyui_url_changed(self.comfyui_url_input.text())
+
+        # ========== 阿里云 OSS 配置显示（只读）==========
+        oss_group = QGroupBox("阿里云 OSS 配置")
+        oss_group.setObjectName("configGroup")
+        oss_form_layout = QVBoxLayout(oss_group)
+        oss_form_layout.setContentsMargins(12, 12, 12, 12)
+        oss_form_layout.setSpacing(8)
+
+        # 读取 OSS 配置
+        oss_endpoint = parser.get("OSS", "Endpoint", fallback="未配置")
+        oss_bucket = parser.get("OSS", "Bucket", fallback="未配置")
+        oss_key_id = parser.get("OSS", "AccessKeyId", fallback="未配置")
+        oss_key_secret = parser.get("OSS", "AccessKeySecret", fallback="未配置")
+
+        # Endpoint
+        oss_row1 = QHBoxLayout()
+        oss_endpoint_label = QLabel("Endpoint:")
+        oss_endpoint_label.setObjectName("configLabel")
+        oss_endpoint_label.setFixedWidth(100)
+        oss_row1.addWidget(oss_endpoint_label)
+        self.oss_endpoint_input = QLineEdit(oss_endpoint)
+        self.oss_endpoint_input.setObjectName("configInput")
+        self.oss_endpoint_input.setReadOnly(True)
+        self.oss_endpoint_input.setMinimumHeight(32)
+        oss_row1.addWidget(self.oss_endpoint_input)
+        oss_form_layout.addLayout(oss_row1)
+
+        # Bucket
+        oss_row2 = QHBoxLayout()
+        oss_bucket_label = QLabel("Bucket:")
+        oss_bucket_label.setObjectName("configLabel")
+        oss_bucket_label.setFixedWidth(100)
+        oss_row2.addWidget(oss_bucket_label)
+        self.oss_bucket_input = QLineEdit(oss_bucket)
+        self.oss_bucket_input.setObjectName("configInput")
+        self.oss_bucket_input.setReadOnly(True)
+        self.oss_bucket_input.setMinimumHeight(32)
+        oss_row2.addWidget(self.oss_bucket_input)
+        oss_form_layout.addLayout(oss_row2)
+
+        # AccessKeyId
+        oss_row3 = QHBoxLayout()
+        oss_key_label = QLabel("AccessKeyId:")
+        oss_key_label.setObjectName("configLabel")
+        oss_key_label.setFixedWidth(100)
+        oss_row3.addWidget(oss_key_label)
+        self.oss_key_input = QLineEdit(oss_key_id)
+        self.oss_key_input.setObjectName("configInput")
+        self.oss_key_input.setReadOnly(True)
+        self.oss_key_input.setMinimumHeight(32)
+        oss_row3.addWidget(self.oss_key_input)
+        oss_form_layout.addLayout(oss_row3)
+
+        # AccessKeySecret (显示为星号)
+        oss_row4 = QHBoxLayout()
+        oss_secret_label = QLabel("AccessKeySecret:")
+        oss_secret_label.setObjectName("configLabel")
+        oss_secret_label.setFixedWidth(100)
+        oss_row4.addWidget(oss_secret_label)
+        self.oss_secret_input = QLineEdit(oss_key_secret)
+        self.oss_secret_input.setObjectName("configInput")
+        self.oss_secret_input.setReadOnly(True)
+        self.oss_secret_input.setEchoMode(QLineEdit.Password)
+        self.oss_secret_input.setMinimumHeight(32)
+        oss_row4.addWidget(self.oss_secret_input)
+        oss_form_layout.addLayout(oss_row4)
+
+        info_layout.addWidget(oss_group)
+
+        log_group = QGroupBox("????")
+        log_group.setObjectName("logGroup")
+        log_layout = QVBoxLayout(log_group)
+        log_layout.setContentsMargins(12, 12, 12, 12)
+        log_layout.setSpacing(8)
+
+        self.runtime_log_view = QTextEdit()
+        self.runtime_log_view.setObjectName("runtimeLogView")
+        self.runtime_log_view.setReadOnly(True)
+        self.runtime_log_view.setLineWrapMode(QTextEdit.NoWrap)
+        self.runtime_log_view.setMinimumHeight(220)
+        log_layout.addWidget(self.runtime_log_view, 1)
+
+        log_btn_layout = QHBoxLayout()
+        log_btn_layout.addStretch()
+        self.copy_log_btn = QPushButton("????????")
+        self.copy_log_btn.setObjectName("copyLogBtn")
+        self.copy_log_btn.setMinimumHeight(34)
+        self.copy_log_btn.clicked.connect(self._copy_runtime_logs)
+        log_btn_layout.addWidget(self.copy_log_btn)
+        log_layout.addLayout(log_btn_layout)
+
+        info_layout.addWidget(log_group, 1)
+
+        info_layout.addStretch()
+
+        self.page_stack.addWidget(tool_page)
+        self.page_stack.addWidget(info_page)
+
+        self.apply_styles()
+        self.switch_page(0)
+
     def apply_styles(self):
-        """应用样式表"""
-        style = """
-        QMainWindow {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                stop:0 #1e293b, stop:0.5 #1e3a5f, stop:1 #172554);
-        }
-        
-        QLabel#titleLabel {
-            font-size: 22px;
-            font-weight: bold;
-            color: #ffffff;
-            padding: 3px;
-        }
-        
-        QLabel#sectionLabel {
-            font-size: 13px;
-            font-weight: bold;
-            color: #94a3b8;
-            padding: 3px 0;
-        }
-        
-        QLabel#fileLabel {
-            font-size: 12px;
-            color: #cbd5e1;
-            padding: 8px 12px;
-            background: rgba(15, 23, 42, 0.6);
-            border-radius: 6px;
-            border: 1px solid rgba(148, 163, 184, 0.2);
-        }
-        
-        QLabel#statusLabel {
-            font-size: 11px;
-            color: #94a3b8;
-            padding-left: 10px;
-        }
-        
-        QLabel#completeLabel {
-            font-size: 15px;
-            font-weight: bold;
-            color: #4ade80;
-        }
-        
-        QLabel#outputPathLabel, QLabel#reportLabel {
-            font-size: 12px;
-            color: #93c5fd;
-        }
-        
-        QPushButton {
-            font-size: 12px;
-            font-weight: bold;
-            color: white;
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #6366f1, stop:1 #4f46e5);
-            border: none;
-            border-radius: 8px;
-            padding: 10px 18px;
-        }
-        
-        QPushButton:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #818cf8, stop:1 #6366f1);
-        }
-        
-        QPushButton:pressed {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #4f46e5, stop:1 #4338ca);
-        }
-        
-        QPushButton:disabled {
-            background: rgba(100, 116, 139, 0.4);
-            color: rgba(255, 255, 255, 0.4);
-        }
-        
-        QPushButton#browseBtn {
-            padding: 8px 14px;
-            font-size: 11px;
-        }
-        
-        QPushButton#stage1Btn {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #0ea5e9, stop:1 #0284c7);
-        }
-        QPushButton#stage1Btn:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #38bdf8, stop:1 #0ea5e9);
-        }
-        
-        QPushButton#stage2Btn {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #f59e0b, stop:1 #d97706);
-        }
-        QPushButton#stage2Btn:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #fbbf24, stop:1 #f59e0b);
-        }
-        
-        QPushButton#autoBtn {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #22c55e, stop:1 #16a34a);
-        }
-        QPushButton#autoBtn:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #4ade80, stop:1 #22c55e);
-        }
-        
-        QPushButton#manualStage2Btn {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #a855f7, stop:1 #9333ea);
-            font-size: 11px;
-        }
-        QPushButton#manualStage2Btn:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #c084fc, stop:1 #a855f7);
-        }
-        
-        QPushButton#openFolderBtn, QPushButton#openReportBtn, QPushButton#openReportFolderBtn {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #3b82f6, stop:1 #2563eb);
-            padding: 8px 12px;
-            font-size: 11px;
-            margin: 2px;
-        }
-        
-        QPushButton#stopBtn {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #ef4444, stop:1 #dc2626);
-            padding: 5px 10px;
-            font-size: 11px;
-        }
-        QPushButton#stopBtn:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #f87171, stop:1 #ef4444);
-        }
-        
-        QLabel#runningIndicator {
-            font-size: 18px;
-            color: #22c55e;
-        }
-        
-        QTableWidget#resultTable {
-            background: rgba(15, 23, 42, 0.7);
-            color: #e2e8f0;
-            border: 1px solid rgba(148, 163, 184, 0.15);
-            border-radius: 6px;
-            gridline-color: rgba(148, 163, 184, 0.1);
-            font-size: 12px;
-        }
-        
-        QTableWidget#resultTable::item {
-            padding: 6px 8px;
-            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
-        }
-        
-        QTableWidget#resultTable::item:selected {
-            background: rgba(99, 102, 241, 0.3);
-        }
-        
-        QHeaderView::section {
-            background: rgba(51, 65, 85, 0.8);
-            color: #f1f5f9;
-            font-weight: bold;
-            font-size: 11px;
-            padding: 8px;
-            border: none;
-            border-bottom: 2px solid rgba(99, 102, 241, 0.5);
-        }
-        
-        QProgressBar {
-            border: none;
-            border-radius: 5px;
-            background: rgba(15, 23, 42, 0.6);
-            text-align: center;
-            color: white;
-            font-weight: bold;
-            font-size: 11px;
-        }
-        
-        QProgressBar::chunk {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                stop:0 #6366f1, stop:0.5 #8b5cf6, stop:1 #d946ef);
-            border-radius: 5px;
-        }
-        
-        QFrame#completeFrame {
-            background: rgba(34, 197, 94, 0.12);
-            border: 2px solid rgba(34, 197, 94, 0.4);
-            border-radius: 10px;
-        }
-        
-        QScrollBar:vertical {
-            background: rgba(15, 23, 42, 0.4);
-            width: 10px;
-            border-radius: 5px;
-        }
-        
-        QScrollBar::handle:vertical {
-            background: rgba(148, 163, 184, 0.3);
-            border-radius: 5px;
-            min-height: 20px;
-        }
-        
-        QScrollBar::handle:vertical:hover {
-            background: rgba(148, 163, 184, 0.5);
-        }
-        
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-            height: 0px;
-        }
-        """
-        self.setStyleSheet(style)
-        
+        """Load dark theme from QSS file."""
+        qss_path = Path(__file__).parent / "styles" / "dark_theme.qss"
+        try:
+            with open(qss_path, "r", encoding="utf-8") as f:
+                self.setStyleSheet(f.read())
+        except Exception as e:
+            logger.warning(f"Failed to load stylesheet: {qss_path} ({e})")
+
+    def switch_page(self, index):
+        """Switch content page from left navigation."""
+        self.page_stack.setCurrentIndex(index)
+        self.nav_tool_btn.setProperty("active", index == 0)
+        self.nav_info_btn.setProperty("active", index == 1)
+        for btn in (self.nav_tool_btn, self.nav_info_btn):
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+            btn.update()
+
+    def _read_runtime_config(self):
+        """Read config.ini for info page display only."""
+        config_path = Path(__file__).parent / "config.ini"
+        parser = configparser.ConfigParser()
+        if config_path.exists():
+            parser.read(config_path, encoding="utf-8")
+        return config_path, parser
+
+    def _init_runtime_log_capture(self):
+        """Attach a logging handler to stream logs into config page."""
+        self._log_bridge = LogSignalBridge()
+        self._log_bridge.message.connect(self._append_runtime_log)
+
+        self._gui_log_handler = GuiLogHandler(self._log_bridge)
+        self._gui_log_handler.setLevel(logging.DEBUG)
+        self._gui_log_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+                "%Y-%m-%d %H:%M:%S",
+            )
+        )
+
+        root_logger = logging.getLogger('')
+        root_logger.addHandler(self._gui_log_handler)
+
+    def _load_existing_log_file(self):
+        """Load existing process.log so users can inspect previous run details."""
+        if not hasattr(self, "runtime_log_view"):
+            return
+        log_path = Path(__file__).parent / "process.log"
+        if not log_path.exists():
+            return
+
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read().strip()
+            if content:
+                self.runtime_log_view.setPlainText(content)
+                self.runtime_log_view.moveCursor(QTextCursor.End)
+        except Exception as e:
+            self.runtime_log_view.append(f"[log-load-error] {e}")
+
+    def _append_runtime_log(self, message: str):
+        """Append one log line into runtime log panel."""
+        if not hasattr(self, "runtime_log_view"):
+            return
+        if message is None:
+            return
+
+        self.runtime_log_view.append(str(message).rstrip())
+
+        # Keep recent logs only to avoid unlimited memory growth.
+        content = self.runtime_log_view.toPlainText().splitlines()
+        if len(content) > self._runtime_log_max_lines:
+            content = content[-self._runtime_log_max_lines:]
+            self.runtime_log_view.setPlainText("\n".join(content))
+
+        self.runtime_log_view.moveCursor(QTextCursor.End)
+
+    def _copy_runtime_logs(self):
+        """Copy all runtime logs with one click."""
+        if not hasattr(self, "runtime_log_view"):
+            return
+
+        text = self.runtime_log_view.toPlainText().strip()
+        if not text:
+            QMessageBox.information(self, "??", "???????????")
+            return
+
+        QApplication.clipboard().setText(text)
+        QMessageBox.information(self, "????", "??????????")
+
     def browse_file(self):
         """浏览并选择任务文件"""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -982,11 +1075,11 @@ class MainWindow(QMainWindow):
         if mode == 'stage2' and self.worker and self.worker.stage1_results:
             old_results = self.worker.stage1_results
             old_output_dir = self.worker.stage1_output_dir
-            self.worker = WorkerThread(mode, self.task_file)
+            self.worker = WorkerThread(mode, self.task_file, comfyui_url=self.get_comfyui_url())
             self.worker.stage1_results = old_results
             self.worker.stage1_output_dir = old_output_dir
         else:
-            self.worker = WorkerThread(mode, self.task_file, manual_dir)
+            self.worker = WorkerThread(mode, self.task_file, manual_dir, comfyui_url=self.get_comfyui_url())
         
         self.worker.progress_updated.connect(self.update_progress)
         self.worker.log_message.connect(self.append_log)
@@ -1129,7 +1222,7 @@ class MainWindow(QMainWindow):
         open_btn = msg.addButton("📂 打开文件夹", QMessageBox.ActionRole)
         close_btn = msg.addButton("关闭", QMessageBox.RejectRole)
         
-        msg.exec_()
+        msg.exec()
         
         clicked = msg.clickedButton()
         if clicked == delete_btn:
@@ -1188,7 +1281,7 @@ class MainWindow(QMainWindow):
             cancel_btn = msg.addButton("取消", QMessageBox.RejectRole)
             continue_btn = msg.addButton("继续运行", QMessageBox.AcceptRole)
             
-            msg.exec_()
+            msg.exec()
             
             clicked = msg.clickedButton()
             if clicked == delete_btn:
@@ -1207,7 +1300,163 @@ class MainWindow(QMainWindow):
             else:
                 return False  # 取消
         return True  # 没有旧报告，可以继续
-    
+
+    # ---- ComfyUI 全局配置 ----
+
+    def get_comfyui_url(self) -> str:
+        """??????? ComfyUI ???"""
+        return self.comfyui_url_input.text().strip()
+
+    def _normalize_comfyui_url(self, url: str) -> str:
+        """Normalize user input URL for test/save."""
+        clean = (url or "").strip()
+        if not clean:
+            return ""
+        if "://" not in clean:
+            clean = f"http://{clean}"
+        return clean.rstrip("/")
+
+    def _set_comfyui_status(self, state: str, message: str):
+        """Update ComfyUI config status text and style state."""
+        if not hasattr(self, "comfyui_status_label"):
+            return
+        self.comfyui_status_label.setProperty("state", state)
+        self.comfyui_status_label.setText(message)
+        self.comfyui_status_label.style().unpolish(self.comfyui_status_label)
+        self.comfyui_status_label.style().polish(self.comfyui_status_label)
+        self.comfyui_status_label.update()
+
+    def _on_comfyui_url_changed(self, _text: str):
+        """URL changed: require re-test before save."""
+        self._comfyui_test_ok = False
+        self._comfyui_tested_url = ""
+
+        if not hasattr(self, "save_comfyui_btn") or not hasattr(self, "test_comfyui_btn"):
+            return
+
+        current_url = self._normalize_comfyui_url(self.get_comfyui_url())
+        self.save_comfyui_btn.setEnabled(False)
+        self.test_comfyui_btn.setEnabled(bool(current_url))
+        self._set_comfyui_status(
+            "pending",
+            "请先点击“测试连接”，连接成功后再保存为全局配置。"
+        )
+
+    def _test_comfyui_connection(self):
+        """Test current ComfyUI URL without saving."""
+        raw_url = self.get_comfyui_url()
+        url = self._normalize_comfyui_url(raw_url)
+        if not url:
+            QMessageBox.warning(self, "警告", "请输入 ComfyUI 地址")
+            return
+
+        if url != raw_url:
+            self.comfyui_url_input.setText(url)
+
+        if self._comfyui_test_worker and self._comfyui_test_worker.isRunning():
+            return
+
+        self._comfyui_test_ok = False
+        self._comfyui_tested_url = ""
+        self.save_comfyui_btn.setEnabled(False)
+        self.test_comfyui_btn.setEnabled(False)
+        self.test_comfyui_btn.setText("测试中...")
+        self._set_comfyui_status("testing", f"正在测试连接: {url}")
+
+        self._comfyui_test_worker = ComfyUIConnectionTestWorker(url, self)
+        self._comfyui_test_worker.check_finished.connect(self._on_comfyui_test_finished)
+        self._comfyui_test_worker.start()
+
+    def _on_comfyui_test_finished(self, ok: bool, tested_url: str, message: str):
+        """Handle async test result."""
+        current_url = self._normalize_comfyui_url(self.get_comfyui_url())
+        self.test_comfyui_btn.setEnabled(True)
+        self.test_comfyui_btn.setText("测试连接")
+        self._comfyui_test_worker = None
+
+        # Ignore stale result when user changed URL during test
+        if tested_url != current_url:
+            self.save_comfyui_btn.setEnabled(False)
+            self._set_comfyui_status("pending", "地址已修改，请重新测试连接。")
+            return
+
+        if ok:
+            self._comfyui_test_ok = True
+            self._comfyui_tested_url = tested_url
+            self.save_comfyui_btn.setEnabled(True)
+            self._set_comfyui_status("ok", f"{message}，可点击“保存”写入全局配置。")
+        else:
+            self._comfyui_test_ok = False
+            self._comfyui_tested_url = ""
+            self.save_comfyui_btn.setEnabled(False)
+            self._set_comfyui_status("error", message)
+
+    def _save_comfyui_url(self):
+        """?? ComfyUI ??? config.ini?????????????"""
+        url = self._normalize_comfyui_url(self.get_comfyui_url())
+        if not url:
+            QMessageBox.warning(self, "警告", "请输入 ComfyUI 地址")
+            return
+
+        if not self._comfyui_test_ok or self._comfyui_tested_url != url:
+            QMessageBox.warning(
+                self,
+                "未通过测试",
+                "请先点击“测试连接”，并在连接成功后再保存当前地址。"
+            )
+            return
+
+        config_path = Path(__file__).parent / "config.ini"
+        parser = configparser.ConfigParser()
+        if config_path.exists():
+            parser.read(config_path, encoding="utf-8")
+
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = parsed.hostname or "127.0.0.1"
+        port = str(parsed.port or (443 if parsed.scheme == "https" else 8188))
+
+        if not parser.has_section("ComfyUI"):
+            parser.add_section("ComfyUI")
+        parser.set("ComfyUI", "Host", host)
+        parser.set("ComfyUI", "DefaultPort", port)
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            parser.write(f)
+
+        QMessageBox.information(self, "保存成功", f"ComfyUI 地址已保存: {host}:{port}")
+        self._set_comfyui_status("ok", f"已保存全局配置: {host}:{port}")
+        self.save_comfyui_btn.setEnabled(False)
+
+    def _check_for_updates(self):
+        """后台检查更新"""
+        self.update_check_btn.setEnabled(False)
+        self.update_check_btn.setText("检查中...")
+        self._update_checker = UpdateCheckWorker(APP_VERSION, GITHUB_REPO)
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.no_update.connect(self._on_no_update)
+        self._update_checker.check_failed.connect(self._on_update_check_failed)
+        self._update_checker.start()
+
+    def _on_update_available(self, release_info):
+        """发现新版本，弹出更新对话框"""
+        self.update_check_btn.setEnabled(True)
+        self.update_check_btn.setText("检查更新")
+        dialog = UpdateDialog(release_info, APP_VERSION, parent=self)
+        dialog.exec()
+
+    def _on_no_update(self):
+        """已是最新版本"""
+        self.update_check_btn.setEnabled(True)
+        self.update_check_btn.setText("检查更新")
+        logger.info("当前已是最新版本")
+
+    def _on_update_check_failed(self, error):
+        """检查更新失败"""
+        self.update_check_btn.setEnabled(True)
+        self.update_check_btn.setText("检查更新")
+        logger.debug(f"检查更新失败: {error}")
+
     def closeEvent(self, event):
         """关闭事件"""
         if self.worker and self.worker.isRunning():
@@ -1238,7 +1487,7 @@ def main():
     window = MainWindow()
     window.show()
     
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

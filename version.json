@@ -1,9 +1,0 @@
-{
-    "latest_version": "1.0.1",
-    "download_url": "https://github.com/stokisai/ImageProcessingTool/releases/download/v1.0.1/ImageProcessingTool_v1.0.1.exe",
-    "force": false,
-    "changelog": [
-        "添加自动更新检查功能",
-        "改进稳定性"
-    ]
-}

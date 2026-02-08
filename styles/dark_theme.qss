@@ -1,0 +1,355 @@
+﻿/* Minimal dark commercial theme (PySide6, no gradients) */
+
+QWidget#appRoot {
+    background: #1f232a;
+    color: #e8eef6;
+    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    font-size: 14px;
+}
+
+QLabel {
+    color: #dde6f1;
+}
+
+QFrame#sidebar {
+    background: #191d23;
+    border: 1px solid #2d333b;
+    border-radius: 8px;
+}
+
+QLabel#sidebarTitle {
+    color: #f6f9ff;
+    font-size: 16px;
+    font-weight: 600;
+    padding: 6px 4px 10px 4px;
+}
+
+QLabel#sidebarVersion {
+    color: #bac6d4;
+    padding: 4px;
+}
+
+QFrame#contentArea {
+    background: #232830;
+    border: 1px solid #2d333b;
+    border-radius: 8px;
+}
+
+QLabel#pageTitle {
+    color: #f6f9ff;
+    font-size: 22px;
+    font-weight: 600;
+    padding: 2px 0 8px 0;
+}
+
+QLabel#sectionLabel {
+    color: #dce5ef;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 4px 0;
+}
+
+QLabel#fileIcon,
+QLabel#statusLabel,
+QLabel#infoText,
+QLabel#outputPathLabel,
+QLabel#reportLabel {
+    color: #cfd8e4;
+}
+
+QLabel#fileLabel {
+    color: #e8eef6;
+    background: #1b2026;
+    border: 1px solid #343b44;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+
+QFrame#completeFrame {
+    background: #1b2026;
+    border: 1px solid #343b44;
+    border-radius: 8px;
+}
+
+QLabel#completeLabel {
+    color: #e8eef6;
+    font-weight: 600;
+}
+
+QPushButton {
+    color: #f3f7fd;
+    background: #343c48;
+    border: 1px solid #4a5462;
+    border-radius: 8px;
+    padding: 8px 12px;
+    min-height: 30px;
+}
+
+QPushButton:hover {
+    background: #3d4653;
+    border-color: #5a6678;
+}
+
+QPushButton:pressed {
+    background: #2e3641;
+}
+
+QPushButton:disabled {
+    color: #96a3b2;
+    background: #2b313a;
+    border-color: #3a424d;
+}
+
+/* Accent color only: active nav / primary button / progress bar */
+QPushButton#navButton {
+    text-align: left;
+    padding: 8px 10px;
+}
+
+QPushButton#navButton[active="true"] {
+    color: #ffffff;
+    background: #4f8cff;
+    border: 1px solid #4f8cff;
+}
+
+QPushButton#autoBtn[primary="true"] {
+    color: #ffffff;
+    background: #4f8cff;
+    border: 1px solid #4f8cff;
+}
+
+QPushButton#autoBtn[primary="true"]:hover,
+QPushButton#navButton[active="true"]:hover {
+    background: #5c97ff;
+    border-color: #5c97ff;
+}
+
+
+QGroupBox#configGroup {
+    color: #e5eaf0;
+    border: 1px solid #3a424d;
+    border-radius: 8px;
+    margin-top: 12px;
+    padding-top: 14px;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+QGroupBox#configGroup::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 6px;
+    color: #f6f9ff;
+    background: #232830;
+}
+
+QLabel#configLabel {
+    color: #e3e8ee;
+    font-size: 14px;
+    font-weight: 600;
+    min-width: 94px;
+}
+
+QLineEdit#configInput {
+    background: #141922;
+    color: #f8fbff;
+    border: 1px solid #5a6678;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 14px;
+    font-weight: 600;
+    selection-background-color: #4f8cff;
+    selection-color: #ffffff;
+}
+
+QLineEdit#configInput:focus {
+    border: 1px solid #4f8cff;
+    background: #111824;
+}
+
+
+QPushButton#testConfigBtn {
+    color: #f8fbff;
+    background: #3f4b5d;
+    border: 1px solid #5f6f86;
+    font-weight: 700;
+    padding: 8px 12px;
+}
+
+QPushButton#testConfigBtn:hover {
+    background: #4a586d;
+    border-color: #7b8da6;
+}
+
+QPushButton#testConfigBtn:disabled {
+    color: #a8b4c3;
+    background: #2c3440;
+    border-color: #4a5667;
+}
+
+QLabel#configStatus {
+    padding: 2px 4px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QLabel#configStatus[state="pending"] {
+    color: #cfd9e6;
+}
+
+QLabel#configStatus[state="testing"] {
+    color: #8ec5ff;
+}
+
+QLabel#configStatus[state="ok"] {
+    color: #7ddc9a;
+}
+
+QLabel#configStatus[state="error"] {
+    color: #ff9aa2;
+}
+
+QPushButton#saveConfigBtn {
+    color: #ffffff;
+    background: #4f8cff;
+    border: 1px solid #4f8cff;
+    font-weight: 700;
+    padding: 8px 14px;
+}
+
+QPushButton#saveConfigBtn:hover {
+    background: #5c97ff;
+    border-color: #5c97ff;
+}
+
+QPushButton#saveConfigBtn:pressed {
+    background: #3f7aeb;
+    border-color: #3f7aeb;
+}
+
+QPushButton#stopBtn {
+    min-width: 70px;
+}
+
+QLabel#runningIndicator {
+    color: #9aa8b9;
+    font-size: 14px;
+}
+
+QProgressBar {
+    background: #1b2026;
+    border: 1px solid #465061;
+    border-radius: 8px;
+    text-align: center;
+    color: #f4f8ff;
+    font-weight: 600;
+    min-height: 20px;
+}
+
+QProgressBar::chunk {
+    background: #4f8cff;
+    border-radius: 8px;
+}
+
+QTableWidget#resultTable {
+    background: #1b2026;
+    alternate-background-color: #222934;
+    border: 1px solid #465061;
+    border-radius: 8px;
+    color: #edf3fb;
+    gridline-color: #3a4556;
+    selection-background-color: #344154;
+}
+
+QTableWidget#sysInfoTable {
+    background: #1b2026;
+    alternate-background-color: #222934;
+    border: 1px solid #465061;
+    border-radius: 8px;
+    color: #edf3fb;
+    gridline-color: #3a4556;
+    selection-background-color: #344154;
+}
+
+QHeaderView::section {
+    background: #2f3744;
+    color: #f4f8ff;
+    border: none;
+    border-bottom: 1px solid #4d596b;
+    font-weight: 700;
+    padding: 8px;
+}
+
+QScrollBar:vertical {
+    background: #1b2026;
+    width: 10px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:vertical {
+    background: #3a424d;
+    min-height: 24px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #4a5462;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox {
+    color: #f1f6fd;
+}
+
+
+QGroupBox#logGroup {
+    color: #eef4fd;
+    border: 1px solid #4d5a6e;
+    border-radius: 8px;
+    margin-top: 10px;
+    padding-top: 14px;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+QGroupBox#logGroup::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 6px;
+    color: #f6f9ff;
+    background: #232830;
+}
+
+QTextEdit#runtimeLogView {
+    background: #111720;
+    color: #eaf2fc;
+    border: 1px solid #4f5d73;
+    border-radius: 8px;
+    padding: 8px;
+    font-family: "Consolas", "Microsoft YaHei UI", monospace;
+    font-size: 12px;
+    selection-background-color: #4f8cff;
+    selection-color: #ffffff;
+}
+
+QPushButton#copyLogBtn {
+    color: #ffffff;
+    background: #4f8cff;
+    border: 1px solid #4f8cff;
+    font-weight: 700;
+    padding: 8px 14px;
+}
+
+QPushButton#copyLogBtn:hover {
+    background: #5c97ff;
+    border-color: #5c97ff;
+}
+
+QPushButton#copyLogBtn:pressed {
+    background: #3f7aeb;
+    border-color: #3f7aeb;
+}
