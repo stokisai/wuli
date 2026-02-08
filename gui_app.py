@@ -5,7 +5,7 @@
 """
 
 # 版本信息
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
@@ -1610,6 +1610,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
