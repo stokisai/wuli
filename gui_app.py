@@ -5,7 +5,7 @@
 """
 
 # 版本信息
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.1.0"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QTableWidget, QTableWidgetItem,
     QProgressBar, QTextEdit, QFrame, QSplitter, QMessageBox,
     QHeaderView, QGroupBox, QSizePolicy, QScrollArea, QCheckBox,
-    QStackedWidget, QLineEdit
+    QStackedWidget, QLineEdit, QFormLayout
 )
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QObject
 from PySide6.QtGui import QFont, QColor, QPalette, QDesktopServices, QIcon, QBrush, QTextCursor
@@ -820,7 +820,7 @@ class MainWindow(QMainWindow):
         info_layout.addWidget(info_title)
 
         # ComfyUI 全局端口设置
-        comfyui_group = QGroupBox("ComfyUI \u5168\u5c40\u7aef\u53e3")
+        comfyui_group = QGroupBox("ComfyUI 全局端口")
         comfyui_group.setObjectName("configGroup")
         comfyui_form = QHBoxLayout(comfyui_group)
         comfyui_form.setContentsMargins(12, 12, 12, 12)
@@ -832,10 +832,10 @@ class MainWindow(QMainWindow):
         self.comfyui_url_input = QLineEdit()
         self.comfyui_url_input.setObjectName("configInput")
         self.comfyui_url_input.setMinimumHeight(36)
-        self.comfyui_url_input.setPlaceholderText("例如: https://example.com:8188")
+        self.comfyui_url_input.setPlaceholderText("例如: http://127.0.0.1:8188")
         self.comfyui_url_input.textChanged.connect(self._on_comfyui_url_changed)
 
-        # ? config.ini ?????
+        # 读取 config.ini 默认值
         _, parser = self._read_runtime_config()
         host = parser.get("ComfyUI", "Host", fallback="127.0.0.1")
         port = parser.get("ComfyUI", "DefaultPort", fallback="8188")
@@ -866,6 +866,8 @@ class MainWindow(QMainWindow):
         info_layout.addWidget(comfyui_group)
         info_layout.addWidget(self.comfyui_status_label)
         self._on_comfyui_url_changed(self.comfyui_url_input.text())
+        
+        info_layout.addSpacing(10)
 
         # ========== 图片源路径配置 ==========
         source_group = QGroupBox("图片源路径")
@@ -901,35 +903,37 @@ class MainWindow(QMainWindow):
         source_form.addWidget(self.save_source_btn)
 
         info_layout.addWidget(source_group)
+        
+        info_layout.addSpacing(10)
 
 
         # ========== Stage1 Output Path ==========
-        stage1_dir_group = QGroupBox("Stage1 Output Path（阶段1输出路径）")
+        stage1_dir_group = QGroupBox("阶段1 输出路径")
         stage1_dir_group.setObjectName("configGroup")
         stage1_dir_form = QHBoxLayout(stage1_dir_group)
         stage1_dir_form.setContentsMargins(12, 12, 12, 12)
 
-        stage1_dir_label = QLabel("Output Path（输出路径）:")
+        stage1_dir_label = QLabel("输出路径:")
         stage1_dir_label.setObjectName("configLabel")
         stage1_dir_form.addWidget(stage1_dir_label)
 
         self.stage1_output_input = QLineEdit()
         self.stage1_output_input.setObjectName("configInput")
         self.stage1_output_input.setMinimumHeight(36)
-        self.stage1_output_input.setPlaceholderText("请选择阶段1输出文件夹路径...")
+        self.stage1_output_input.setPlaceholderText("选择阶段1输出文件夹路径...")
         saved_stage1_output = parser.get("Paths", "Stage1OutputPath", fallback="")
         if saved_stage1_output:
             self.stage1_output_input.setText(saved_stage1_output)
         stage1_dir_form.addWidget(self.stage1_output_input, 1)
 
-        self.browse_stage1_output_btn = QPushButton("Browse")
+        self.browse_stage1_output_btn = QPushButton("浏览")
         self.browse_stage1_output_btn.setObjectName("testConfigBtn")
         self.browse_stage1_output_btn.setMinimumHeight(36)
         self.browse_stage1_output_btn.setMinimumWidth(72)
         self.browse_stage1_output_btn.clicked.connect(self._browse_stage1_output_dir)
         stage1_dir_form.addWidget(self.browse_stage1_output_btn)
 
-        self.save_stage1_output_btn = QPushButton("Save")
+        self.save_stage1_output_btn = QPushButton("保存")
         self.save_stage1_output_btn.setObjectName("saveConfigBtn")
         self.save_stage1_output_btn.setMinimumHeight(36)
         self.save_stage1_output_btn.setMinimumWidth(72)
@@ -937,13 +941,17 @@ class MainWindow(QMainWindow):
         stage1_dir_form.addWidget(self.save_stage1_output_btn)
 
         info_layout.addWidget(stage1_dir_group)
+        
+        info_layout.addSpacing(10)
 
 
-        oss_group = QGroupBox("阿里云 OSS 配置")
+        oss_group = QGroupBox("阿里云 OSS 配置 (只读)")
         oss_group.setObjectName("configGroup")
-        oss_form_layout = QVBoxLayout(oss_group)
-        oss_form_layout.setContentsMargins(12, 12, 12, 12)
-        oss_form_layout.setSpacing(8)
+        # 使用 QFormLayout 对齐标签和输入框
+        oss_form_layout = QFormLayout(oss_group)
+        oss_form_layout.setContentsMargins(20, 20, 20, 20)
+        oss_form_layout.setSpacing(15)
+        oss_form_layout.setLabelAlignment(Qt.AlignRight)
 
         # 读取 OSS 配置
         oss_endpoint = parser.get("OSS", "Endpoint", fallback="未配置")
@@ -951,58 +959,34 @@ class MainWindow(QMainWindow):
         oss_key_id = parser.get("OSS", "AccessKeyId", fallback="未配置")
         oss_key_secret = parser.get("OSS", "AccessKeySecret", fallback="未配置")
 
-        # Endpoint
-        oss_row1 = QHBoxLayout()
-        oss_endpoint_label = QLabel("Endpoint:")
-        oss_endpoint_label.setObjectName("configLabel")
-        oss_endpoint_label.setFixedWidth(100)
-        oss_row1.addWidget(oss_endpoint_label)
-        self.oss_endpoint_input = QLineEdit(oss_endpoint)
-        self.oss_endpoint_input.setObjectName("configInput")
-        self.oss_endpoint_input.setReadOnly(True)
-        self.oss_endpoint_input.setMinimumHeight(32)
-        oss_row1.addWidget(self.oss_endpoint_input)
-        oss_form_layout.addLayout(oss_row1)
+        def create_readonly_input(text, is_password=False):
+            inp = QLineEdit(text)
+            inp.setObjectName("configInput")
+            inp.setReadOnly(True)
+            inp.setMinimumHeight(32)
+            if is_password:
+                inp.setEchoMode(QLineEdit.Password)
+            # 稍微改变背景色以示只读
+            inp.setStyleSheet("QLineEdit { background-color: rgba(30, 41, 59, 0.5); color: #94a3b8; border: 1px solid #334155; }")
+            return inp
 
-        # Bucket
-        oss_row2 = QHBoxLayout()
-        oss_bucket_label = QLabel("Bucket:")
-        oss_bucket_label.setObjectName("configLabel")
-        oss_bucket_label.setFixedWidth(100)
-        oss_row2.addWidget(oss_bucket_label)
-        self.oss_bucket_input = QLineEdit(oss_bucket)
-        self.oss_bucket_input.setObjectName("configInput")
-        self.oss_bucket_input.setReadOnly(True)
-        self.oss_bucket_input.setMinimumHeight(32)
-        oss_row2.addWidget(self.oss_bucket_input)
-        oss_form_layout.addLayout(oss_row2)
+        self.oss_endpoint_input = create_readonly_input(oss_endpoint)
+        oss_form_layout.addRow("Endpoint:", self.oss_endpoint_input)
 
-        # AccessKeyId
-        oss_row3 = QHBoxLayout()
-        oss_key_label = QLabel("AccessKeyId:")
-        oss_key_label.setObjectName("configLabel")
-        oss_key_label.setFixedWidth(100)
-        oss_row3.addWidget(oss_key_label)
-        self.oss_key_input = QLineEdit(oss_key_id)
-        self.oss_key_input.setObjectName("configInput")
-        self.oss_key_input.setReadOnly(True)
-        self.oss_key_input.setMinimumHeight(32)
-        oss_row3.addWidget(self.oss_key_input)
-        oss_form_layout.addLayout(oss_row3)
+        self.oss_bucket_input = create_readonly_input(oss_bucket)
+        oss_form_layout.addRow("Bucket:", self.oss_bucket_input)
 
-        # AccessKeySecret (显示为星号)
-        oss_row4 = QHBoxLayout()
-        oss_secret_label = QLabel("AccessKeySecret:")
-        oss_secret_label.setObjectName("configLabel")
-        oss_secret_label.setFixedWidth(100)
-        oss_row4.addWidget(oss_secret_label)
-        self.oss_secret_input = QLineEdit(oss_key_secret)
-        self.oss_secret_input.setObjectName("configInput")
-        self.oss_secret_input.setReadOnly(True)
-        self.oss_secret_input.setEchoMode(QLineEdit.Password)
-        self.oss_secret_input.setMinimumHeight(32)
-        oss_row4.addWidget(self.oss_secret_input)
-        oss_form_layout.addLayout(oss_row4)
+        self.oss_key_input = create_readonly_input(oss_key_id)
+        oss_form_layout.addRow("AccessKeyId:", self.oss_key_input)
+
+        self.oss_secret_input = create_readonly_input(oss_key_secret, is_password=True)
+        oss_form_layout.addRow("AccessKeySecret:", self.oss_secret_input)
+        
+        # 调整标签样式
+        for i in range(oss_form_layout.rowCount()):
+            item = oss_form_layout.itemAt(i, QFormLayout.LabelRole)
+            if item and item.widget():
+                item.widget().setStyleSheet("font-weight: bold; color: #cbd5e1; font-size: 13px;")
 
         info_layout.addWidget(oss_group)
 
