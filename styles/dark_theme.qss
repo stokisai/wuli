@@ -353,3 +353,35 @@ QPushButton#copyLogBtn:pressed {
     background: #3f7aeb;
     border-color: #3f7aeb;
 }
+
+
+QMessageBox {
+    background: #1d222b;
+}
+
+QMessageBox QLabel {
+    color: #f3f8ff;
+    font-size: 14px;
+    min-width: 260px;
+}
+
+QMessageBox QPushButton {
+    color: #ffffff;
+    background: #4f8cff;
+    border: 1px solid #4f8cff;
+    border-radius: 8px;
+    font-weight: 700;
+    min-width: 88px;
+    min-height: 34px;
+    padding: 6px 14px;
+}
+
+QMessageBox QPushButton:hover {
+    background: #5c97ff;
+    border-color: #5c97ff;
+}
+
+QMessageBox QPushButton:pressed {
+    background: #3f7aeb;
+    border-color: #3f7aeb;
+}

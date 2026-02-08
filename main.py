@@ -27,6 +27,14 @@ def main():
     
     input_task_file = config["Paths"]["InputTaskFile"]
     output_report_file = config["Paths"]["OutputReportFile"]
+    source_path = config.get("Paths", "SourcePath", fallback="")
+
+    if not source_path:
+        logger.error("未配置图片源路径！请在 config.ini [Paths] 中设置 SourcePath")
+        return
+    if not os.path.exists(source_path):
+        logger.error(f"图片源路径不存在: {source_path}")
+        return
     
     if not os.path.exists(input_task_file):
         logger.error(f"Task file not found: {input_task_file}")
@@ -46,14 +54,14 @@ def main():
         logger.error(f"Failed to read task file: {e}")
         return
 
-    # 1. GROUP BY 'Folder Name' + 'Source Path' to handle multi-row logic
+    # 1. GROUP BY 'Folder Name' to handle multi-row logic
     # We maintain order of appearance in Excel
-    grouped = df_tasks.groupby(['Folder Name', 'Source Path'], sort=False)
-    
+    grouped = df_tasks.groupby(['Folder Name'], sort=False)
+
     report_aggregator = {}
     all_tasks = []  # 在循环外初始化任务列表
-    
-    for (folder_name, source_path), group_df in grouped:
+
+    for folder_name, group_df in grouped:
         logger.info(f"Processing Task Group: {folder_name} (Rows: {len(group_df)})")
         
         if folder_name not in report_aggregator:
@@ -65,9 +73,6 @@ def main():
              logger.warning(f"Drive folder creation failed for {folder_name}. Continuing with local processing only.")
         
         # B. Get Images - 递归遍历所有子文件夹，按文件夹分组
-        if not os.path.exists(source_path):
-            logger.error(f"Source path not found: {source_path}")
-            continue
         
         def collect_images_by_folder(root_path):
             """递归收集所有子文件夹及其图片

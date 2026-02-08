@@ -5,7 +5,7 @@
 """
 
 # 版本信息
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
@@ -50,12 +50,13 @@ class WorkerThread(QThread):
     error_occurred = Signal(str)  # error message
     report_saved = Signal(str)  # report file path
     
-    def __init__(self, mode, task_file, manual_stage2_dir=None, comfyui_url=None, parent=None):
+    def __init__(self, mode, task_file, manual_stage2_dir=None, comfyui_url=None, source_path=None, parent=None):
         super().__init__(parent)
         self.mode = mode  # 'stage1', 'stage2', 'full_auto', 'manual_stage2'
         self.task_file = task_file
         self.manual_stage2_dir = manual_stage2_dir  # 手动阶段2的输入目录
         self.comfyui_url = comfyui_url  # 全局 ComfyUI 地址
+        self.source_path = source_path  # 全局图片源路径
         self.stage1_results = {}
         self.stage1_output_dir = None
         self.should_stop = False
@@ -97,13 +98,19 @@ class WorkerThread(QThread):
         
         # 收集所有任务
         all_tasks = []
-        grouped = df_tasks.groupby(['Folder Name', 'Source Path'], sort=False)
-        
-        for (folder_name, source_path), group_df in grouped:
-            if not os.path.exists(source_path):
-                self.log(f"⚠ 源路径不存在: {source_path}")
-                continue
-                
+
+        # 使用全局 source_path
+        source_path = self.source_path
+        if not source_path:
+            self.error_occurred.emit("未配置图片源路径！请在「配置」页面设置图片源路径")
+            return
+        if not os.path.exists(source_path):
+            self.error_occurred.emit(f"图片源路径不存在: {source_path}")
+            return
+
+        grouped = df_tasks.groupby(['Folder Name'], sort=False)
+
+        for folder_name, group_df in grouped:
             folder_images = self._collect_images(source_path)
             task_rows = [row for _, row in group_df.iterrows()]
             
@@ -510,11 +517,18 @@ class MainWindow(QMainWindow):
         self._comfyui_test_worker = None
         self._comfyui_test_ok = False
         self._comfyui_tested_url = ""
-        self.init_ui()
+        self._log_bridge = None
+        self._gui_log_handler = None
+        self._runtime_log_max_lines = 6000
+        self._last_progress_marker = None
 
-        # 启动后延迟2秒自动检查更新
-        QTimer.singleShot(2000, self._check_for_updates)
-        
+        self.init_ui()
+        self._init_runtime_log_capture()
+        self._load_existing_log_file()
+
+        # ?????2???????
+        self._update_check_silent = True
+        QTimer.singleShot(2000, lambda: self._check_for_updates(silent=True))
     def init_ui(self):
         """Initialize UI with left sidebar navigation and right content area."""
         self.setWindowTitle(f"\u56fe\u7247\u5904\u7406\u5de5\u5177 v{APP_VERSION}")
@@ -561,7 +575,7 @@ class MainWindow(QMainWindow):
 
         self.update_check_btn = QPushButton("检查更新")
         self.update_check_btn.setObjectName("updateCheckBtn")
-        self.update_check_btn.clicked.connect(self._check_for_updates)
+        self.update_check_btn.clicked.connect(lambda: self._check_for_updates(silent=False))
         sidebar_layout.addWidget(self.update_check_btn)
 
         content_frame = QFrame()
@@ -800,6 +814,41 @@ class MainWindow(QMainWindow):
         info_layout.addWidget(self.comfyui_status_label)
         self._on_comfyui_url_changed(self.comfyui_url_input.text())
 
+        # ========== 图片源路径配置 ==========
+        source_group = QGroupBox("图片源路径")
+        source_group.setObjectName("configGroup")
+        source_form = QHBoxLayout(source_group)
+        source_form.setContentsMargins(12, 12, 12, 12)
+
+        source_label = QLabel("源路径:")
+        source_label.setObjectName("configLabel")
+        source_form.addWidget(source_label)
+
+        self.source_path_input = QLineEdit()
+        self.source_path_input.setObjectName("configInput")
+        self.source_path_input.setMinimumHeight(36)
+        self.source_path_input.setPlaceholderText("选择图片源文件夹路径...")
+        saved_source = parser.get("Paths", "SourcePath", fallback="")
+        if saved_source:
+            self.source_path_input.setText(saved_source)
+        source_form.addWidget(self.source_path_input, 1)
+
+        self.browse_source_btn = QPushButton("浏览")
+        self.browse_source_btn.setObjectName("testConfigBtn")
+        self.browse_source_btn.setMinimumHeight(36)
+        self.browse_source_btn.setMinimumWidth(72)
+        self.browse_source_btn.clicked.connect(self._browse_source_path)
+        source_form.addWidget(self.browse_source_btn)
+
+        self.save_source_btn = QPushButton("保存")
+        self.save_source_btn.setObjectName("saveConfigBtn")
+        self.save_source_btn.setMinimumHeight(36)
+        self.save_source_btn.setMinimumWidth(72)
+        self.save_source_btn.clicked.connect(self._save_source_path)
+        source_form.addWidget(self.save_source_btn)
+
+        info_layout.addWidget(source_group)
+
         # ========== 阿里云 OSS 配置显示（只读）==========
         oss_group = QGroupBox("阿里云 OSS 配置")
         oss_group.setObjectName("configGroup")
@@ -868,7 +917,7 @@ class MainWindow(QMainWindow):
 
         info_layout.addWidget(oss_group)
 
-        log_group = QGroupBox("????")
+        log_group = QGroupBox("\u8fd0\u884c\u65e5\u5fd7")
         log_group.setObjectName("logGroup")
         log_layout = QVBoxLayout(log_group)
         log_layout.setContentsMargins(12, 12, 12, 12)
@@ -883,7 +932,7 @@ class MainWindow(QMainWindow):
 
         log_btn_layout = QHBoxLayout()
         log_btn_layout.addStretch()
-        self.copy_log_btn = QPushButton("????????")
+        self.copy_log_btn = QPushButton("\u4e00\u952e\u590d\u5236\u5168\u90e8\u65e5\u5fd7")
         self.copy_log_btn.setObjectName("copyLogBtn")
         self.copy_log_btn.setMinimumHeight(34)
         self.copy_log_btn.clicked.connect(self._copy_runtime_logs)
@@ -905,7 +954,13 @@ class MainWindow(QMainWindow):
         qss_path = Path(__file__).parent / "styles" / "dark_theme.qss"
         try:
             with open(qss_path, "r", encoding="utf-8") as f:
-                self.setStyleSheet(f.read())
+                qss = f.read()
+
+            app = QApplication.instance()
+            if app:
+                app.setStyleSheet(qss)
+            else:
+                self.setStyleSheet(qss)
         except Exception as e:
             logger.warning(f"Failed to load stylesheet: {qss_path} ({e})")
 
@@ -985,11 +1040,11 @@ class MainWindow(QMainWindow):
 
         text = self.runtime_log_view.toPlainText().strip()
         if not text:
-            QMessageBox.information(self, "??", "???????????")
+            QMessageBox.information(self, "\u63d0\u793a", "\u5f53\u524d\u6ca1\u6709\u53ef\u590d\u5236\u7684\u65e5\u5fd7\u3002")
             return
 
         QApplication.clipboard().setText(text)
-        QMessageBox.information(self, "????", "??????????")
+        QMessageBox.information(self, "\u590d\u5236\u6210\u529f", "\u65e5\u5fd7\u5df2\u590d\u5236\u5230\u526a\u8d34\u677f\u3002")
 
     def browse_file(self):
         """浏览并选择任务文件"""
@@ -1061,26 +1116,27 @@ class MainWindow(QMainWindow):
             self.start_worker('manual_stage2', folder_path)
         
     def start_worker(self, mode, manual_dir=None):
-        """启动工作线程"""
+        """??????"""
+        logger.info(f"Start worker: mode={mode}, manual_dir={manual_dir}")
         self.set_buttons_enabled(False)
         self.complete_frame.setVisible(False)
         self.progress_bar.setValue(0)
-        
-        # 显示运行指示器和停止按钮
+
+        # ????????????
         self.running_indicator.setVisible(True)
         self.stop_btn.setVisible(True)
-        self.indicator_timer.start(300)  # 每300ms切换颜色
-        
-        # 如果是stage2且有之前的结果，复用它
+        self.indicator_timer.start(300)  # ?300ms????
+
+        # ???stage2???????????
         if mode == 'stage2' and self.worker and self.worker.stage1_results:
             old_results = self.worker.stage1_results
             old_output_dir = self.worker.stage1_output_dir
-            self.worker = WorkerThread(mode, self.task_file, comfyui_url=self.get_comfyui_url())
+            self.worker = WorkerThread(mode, self.task_file, comfyui_url=self.get_comfyui_url(), source_path=self.get_source_path())
             self.worker.stage1_results = old_results
             self.worker.stage1_output_dir = old_output_dir
         else:
-            self.worker = WorkerThread(mode, self.task_file, manual_dir, comfyui_url=self.get_comfyui_url())
-        
+            self.worker = WorkerThread(mode, self.task_file, manual_dir, comfyui_url=self.get_comfyui_url(), source_path=self.get_source_path())
+
         self.worker.progress_updated.connect(self.update_progress)
         self.worker.log_message.connect(self.append_log)
         self.worker.result_added.connect(self.add_result_row)
@@ -1088,9 +1144,8 @@ class MainWindow(QMainWindow):
         self.worker.error_occurred.connect(self.on_error)
         self.worker.report_saved.connect(self.on_report_saved)
         self.worker.finished.connect(self.on_worker_finished)
-        
+
         self.worker.start()
-        
     def set_buttons_enabled(self, enabled):
         """设置按钮启用状态"""
         self.stage1_btn.setEnabled(enabled and self.task_file is not None)
@@ -1099,15 +1154,18 @@ class MainWindow(QMainWindow):
         self.manual_stage2_btn.setEnabled(enabled and self.task_file is not None)
         
     def update_progress(self, current, total, message):
-        """更新进度"""
+        """????"""
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(current)
         self.status_label.setText(message)
-        
+
+        marker = (current, total, message)
+        if marker != self._last_progress_marker:
+            self._last_progress_marker = marker
+            logger.info(f"Progress: {current}/{total} | {message}")
     def append_log(self, message):
-        """添加日志"""
-        print(message)
-        
+        """Worker signal hook; global logger handler already captures details."""
+        _ = message
     def add_result_row(self, folder, filename, status, output_path):
         """添加结果行到表格"""
         row = self.result_table.rowCount()
@@ -1169,19 +1227,19 @@ class MainWindow(QMainWindow):
         self.report_label.setText(f"报告文件: {os.path.basename(report_path)}")
             
     def on_error(self, error_message):
-        """错误处理"""
+        """????"""
+        logger.error(f"Worker error: {error_message}")
         QMessageBox.critical(self, "错误", error_message)
-        self.status_label.setText(f"错误")
-        
+        self.status_label.setText("错误")
     def on_worker_finished(self):
-        """工作线程完成"""
+        """??????"""
+        logger.info("Worker finished")
         self.set_buttons_enabled(True)
-        # 隐藏运行指示器
+        # ???????
         self.running_indicator.setVisible(False)
         self.stop_btn.setVisible(False)
         self.indicator_timer.stop()
-        self.status_label.setText("完成")
-    
+        self.status_label.setText("\u5b8c\u6210")
     def animate_indicator(self):
         """动画更新运行指示器颜色"""
         self.indicator_index = (self.indicator_index + 1) % len(self.indicator_colors)
@@ -1428,10 +1486,49 @@ class MainWindow(QMainWindow):
         self._set_comfyui_status("ok", f"已保存全局配置: {host}:{port}")
         self.save_comfyui_btn.setEnabled(False)
 
-    def _check_for_updates(self):
-        """后台检查更新"""
+    # ---- 图片源路径配置 ----
+
+    def get_source_path(self) -> str:
+        """返回当前配置的图片源路径"""
+        return self.source_path_input.text().strip()
+
+    def _browse_source_path(self):
+        """打开文件夹选择对话框"""
+        folder = QFileDialog.getExistingDirectory(self, "选择图片源文件夹", self.get_source_path() or "")
+        if folder:
+            self.source_path_input.setText(folder)
+
+    def _save_source_path(self):
+        """保存图片源路径到 config.ini"""
+        path = self.get_source_path()
+        if not path:
+            QMessageBox.warning(self, "警告", "请输入或选择图片源路径")
+            return
+        if not os.path.isdir(path):
+            QMessageBox.warning(self, "警告", f"路径不存在: {path}")
+            return
+
+        config_path = Path(__file__).parent / "config.ini"
+        parser = configparser.ConfigParser()
+        if config_path.exists():
+            parser.read(config_path, encoding="utf-8")
+        if not parser.has_section("Paths"):
+            parser.add_section("Paths")
+        parser.set("Paths", "SourcePath", path)
+        with open(config_path, "w", encoding="utf-8") as f:
+            parser.write(f)
+        QMessageBox.information(self, "保存成功", f"图片源路径已保存: {path}")
+
+    def _check_for_updates(self, silent=True):
+        """Check updates in background; show dialogs only when silent=False."""
+        if self._update_checker and self._update_checker.isRunning():
+            return
+
+        self._update_check_silent = silent
         self.update_check_btn.setEnabled(False)
         self.update_check_btn.setText("检查中...")
+        logger.info(f"Start update check: version={APP_VERSION}, repo={GITHUB_REPO}, silent={silent}")
+
         self._update_checker = UpdateCheckWorker(APP_VERSION, GITHUB_REPO)
         self._update_checker.update_available.connect(self._on_update_available)
         self._update_checker.no_update.connect(self._on_no_update)
@@ -1439,34 +1536,56 @@ class MainWindow(QMainWindow):
         self._update_checker.start()
 
     def _on_update_available(self, release_info):
-        """发现新版本，弹出更新对话框"""
+        """New version found."""
         self.update_check_btn.setEnabled(True)
         self.update_check_btn.setText("检查更新")
+        logger.info(f"Update available: v{release_info.version}")
         dialog = UpdateDialog(release_info, APP_VERSION, parent=self)
         dialog.exec()
 
     def _on_no_update(self):
-        """已是最新版本"""
+        """Already latest version."""
         self.update_check_btn.setEnabled(True)
         self.update_check_btn.setText("检查更新")
-        logger.info("当前已是最新版本")
+        logger.info("Already latest version")
+        if not self._update_check_silent:
+            QMessageBox.information(
+                self,
+                "检查更新",
+                f"当前已是最新版本 v{APP_VERSION}"
+            )
 
     def _on_update_check_failed(self, error):
-        """检查更新失败"""
+        """Update check failed."""
         self.update_check_btn.setEnabled(True)
         self.update_check_btn.setText("检查更新")
-        logger.debug(f"检查更新失败: {error}")
+        logger.error(f"Update check failed: {error}")
+
+        if not self._update_check_silent:
+            hint = (
+                "可能原因：\n"
+                "1. 仓库为私有仓库，客户端未授权访问；\n"
+                "2. 尚未创建 GitHub Release；\n"
+                "3. Release 未上传 .zip 更新包资产。"
+            )
+            QMessageBox.warning(self, "检查更新失败", f"{error}\n\n{hint}")
 
     def closeEvent(self, event):
-        """关闭事件"""
+        """????"""
+        if self._gui_log_handler:
+            root_logger = logging.getLogger('')
+            if self._gui_log_handler in root_logger.handlers:
+                root_logger.removeHandler(self._gui_log_handler)
+            self._gui_log_handler = None
+
         if self.worker and self.worker.isRunning():
             reply = QMessageBox.question(
-                self, "确认退出",
-                "正在处理中，确定要退出吗？",
+                self, "\u786e\u8ba4\u9000\u51fa",
+                "\u6b63\u5728\u5904\u7406\u4e2d\uff0c\u786e\u5b9a\u8981\u9000\u51fa\u5417\uff1f",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No
             )
-            
+
             if reply == QMessageBox.Yes:
                 self.worker.stop()
                 self.worker.wait(3000)
@@ -1475,7 +1594,6 @@ class MainWindow(QMainWindow):
                 event.ignore()
         else:
             event.accept()
-
 
 def main():
     """主函数"""
@@ -1492,3 +1610,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
