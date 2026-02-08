@@ -5,7 +5,7 @@
 """
 
 # 版本信息
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
@@ -32,7 +32,7 @@ import requests
 
 # 导入处理模块
 from image_processor import ImageProcessor
-from drive_uploader import DriveUploader
+from oss_uploader import OSSUploader
 from comfyui_client import ComfyUIClient
 from utils import setup_logging, ensure_dir
 from updater import UpdateCheckWorker, UpdateDialog
@@ -225,12 +225,12 @@ class WorkerThread(QThread):
             return
         
         processor = ImageProcessor()
-        uploader = DriveUploader()
-        drive_enabled = uploader.authenticate()
-        if drive_enabled:
-            self.log("✓ Google Drive认证成功")
+        uploader = OSSUploader()
+        oss_enabled = uploader.authenticate()
+        if oss_enabled:
+            self.log("✓ 阿里云 OSS 认证成功")
         else:
-            self.log("⚠ Google Drive认证失败，将跳过上传")
+            self.log("⚠ 阿里云 OSS 认证失败，将跳过上传")
         
         tasks = list(self.stage1_results.values())
         success_count = 0
@@ -263,25 +263,25 @@ class WorkerThread(QThread):
                 )
                 
                 if success:
-                    # 上传到Google Drive
-                    if drive_enabled:
+                    # 上传到阿里云 OSS
+                    if oss_enabled:
                         try:
                             # 使用清理过的文件夹名（替换反斜杠）
                             folder_name = task['folder_rel_path'].replace("\\", "_").replace("/", "_")
-                            drive_folder_id = uploader.create_folder(folder_name)
-                            self.log(f"  Drive文件夹: {folder_name} -> {drive_folder_id}")
+                            oss_folder = uploader.create_folder(folder_name)
+                            self.log(f"  OSS文件夹: {oss_folder}")
                             
-                            if drive_folder_id:
-                                file_obj = uploader.upload_file(processed_path, drive_folder_id)
+                            if oss_folder:
+                                file_obj = uploader.upload_file(processed_path, oss_folder)
                                 if file_obj:
                                     result_link = uploader.get_direct_link(file_obj['id'])
                                     self.log(f"  ✓ 已上传: {result_link}")
                                 else:
                                     self.log(f"  ⚠ 上传失败")
                             else:
-                                self.log(f"  ⚠ 创建Drive文件夹失败")
+                                self.log(f"  ⚠ 创建OSS文件夹失败")
                         except Exception as upload_err:
-                            self.log(f"  ⚠ Drive错误: {str(upload_err)}")
+                            self.log(f"  ⚠ OSS错误: {str(upload_err)}")
                     
                     self.log(f"✓ ({idx}/{len(tasks)}) {task['img_name']}")
                     self.result_added.emit(task['folder_rel_path'], task['img_name'], "完成", result_link or processed_path)
@@ -336,12 +336,12 @@ class WorkerThread(QThread):
             return
         
         processor = ImageProcessor()
-        uploader = DriveUploader()
-        drive_enabled = uploader.authenticate()
-        if drive_enabled:
-            self.log("✓ Google Drive认证成功")
+        uploader = OSSUploader()
+        oss_enabled = uploader.authenticate()
+        if oss_enabled:
+            self.log("✓ 阿里云 OSS 认证成功")
         else:
-            self.log("⚠ Google Drive认证失败，将跳过上传")
+            self.log("⚠ 阿里云 OSS 认证失败，将跳过上传")
         
         # 构建任务列表
         all_tasks = []
@@ -389,16 +389,16 @@ class WorkerThread(QThread):
                 )
                 
                 if success:
-                    if drive_enabled:
+                    if oss_enabled:
                         try:
                             folder_name = task['folder_rel_path'].replace("\\", "_").replace("/", "_")
-                            drive_folder_id = uploader.create_folder(folder_name)
-                            if drive_folder_id:
-                                file_obj = uploader.upload_file(processed_path, drive_folder_id)
+                            oss_folder = uploader.create_folder(folder_name)
+                            if oss_folder:
+                                file_obj = uploader.upload_file(processed_path, oss_folder)
                                 if file_obj:
                                     result_link = uploader.get_direct_link(file_obj['id'])
                         except Exception as upload_err:
-                            self.log(f"  ⚠ Drive错误: {str(upload_err)}")
+                            self.log(f"  ⚠ OSS错误: {str(upload_err)}")
                     
                     self.log(f"✓ ({idx}/{len(all_tasks)}) {task['img_name']}")
                     self.result_added.emit(task['folder_rel_path'], task['img_name'], "完成", result_link or processed_path)
