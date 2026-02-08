@@ -5,7 +5,7 @@
 """
 
 # 版本信息
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
@@ -186,10 +186,46 @@ class WorkerThread(QThread):
         
         # 处理图片
         success_count = 0
+        skipped_a_count = 0
+        skipped_b_count = 0
+        
         for idx, task in enumerate(all_tasks, 1):
             if self.should_stop:
                 self.log("用户取消操作")
                 return
+            
+            img_name_lower = task['img_name'].lower()
+            
+            # 规则A: 文件名包含 'a' -> 完全跳过
+            if 'a' in img_name_lower:
+                self.log(f"⏭ ({idx}/{len(all_tasks)}) {task['img_name']} - 跳过(规则A)")
+                self.result_added.emit(task['folder_rel_path'], task['img_name'], "跳过A", "")
+                skipped_a_count += 1
+                continue
+            
+            # 规则B: 文件名包含 'b' -> 跳过ComfyUI，复制原图到Stage1文件夹
+            if 'b' in img_name_lower:
+                # 创建Stage1子文件夹并复制原图
+                stage1_subfolder = os.path.join(global_stage1_dir, task['folder_rel_path'])
+                ensure_dir(stage1_subfolder)
+                stage1_output = os.path.join(stage1_subfolder, task['img_name'])
+                
+                try:
+                    import shutil
+                    shutil.copy2(task['source_path'], stage1_output)
+                    self.log(f"⏭ ({idx}/{len(all_tasks)}) {task['img_name']} - 跳过ComfyUI(规则B)，原图已复制到Stage1")
+                    self.result_added.emit(task['folder_rel_path'], task['img_name'], "跳过ComfyUI", stage1_output)
+                    # 使用复制后的路径
+                    self.stage1_results[task['source_path']] = {
+                        'output': stage1_output,
+                        'task': task
+                    }
+                    skipped_b_count += 1
+                    success_count += 1
+                except Exception as copy_err:
+                    self.log(f"✗ ({idx}/{len(all_tasks)}) {task['img_name']} - 复制失败: {copy_err}")
+                    self.result_added.emit(task['folder_rel_path'], task['img_name'], "复制失败", "")
+                continue
                 
             stage1_subfolder = os.path.join(global_stage1_dir, task['folder_rel_path'])
             ensure_dir(stage1_subfolder)
@@ -213,7 +249,7 @@ class WorkerThread(QThread):
                 self.log(f"✗ ({idx}/{len(all_tasks)}) {task['img_name']} - {str(e)}")
                 self.result_added.emit(task['folder_rel_path'], task['img_name'], "错误", "")
         
-        self.log(f"阶段1完成: {success_count}/{len(all_tasks)} 成功")
+        self.log(f"阶段1完成: {success_count}/{len(all_tasks)} 成功 (跳过A:{skipped_a_count}, 跳过ComfyUI-B:{skipped_b_count})")
         self.stage_completed.emit("stage1", global_stage1_dir, success_count == len(all_tasks))
     
     def run_stage2(self):
