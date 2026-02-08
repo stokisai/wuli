@@ -22,7 +22,7 @@ if exist "图片处理工具.spec" del "图片处理工具.spec"
 
 REM Build command
 pyinstaller --noconfirm ^
-    --onefile ^
+    --onedir ^
     --windowed ^
     --name "图片处理工具" ^
     --icon "NONE" ^
@@ -58,7 +58,7 @@ if errorlevel 1 (
 echo.
 echo ========================================
 echo    Build success
-echo    Output: dist\图片处理工具.exe
+echo    Output: dist\图片处理工具\图片处理工具.exe
 echo ========================================
 echo.
 
@@ -73,3 +73,4 @@ xcopy "styles" "dist\styles\" /E /I /Y >nul
 echo.
 echo Done.
 pause
+
