@@ -5,7 +5,7 @@
 """
 
 # 版本信息
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
@@ -50,7 +50,7 @@ class WorkerThread(QThread):
     error_occurred = Signal(str)  # error message
     report_saved = Signal(str)  # report file path
     
-    def __init__(self, mode, task_file, manual_stage2_dir=None, comfyui_url=None, source_path=None, parent=None):
+    def __init__(self, mode, task_file, manual_stage2_dir=None, comfyui_url=None, source_path=None, stage1_output_dir=None, parent=None):
         super().__init__(parent)
         self.mode = mode  # 'stage1', 'stage2', 'full_auto', 'manual_stage2'
         self.task_file = task_file
@@ -58,7 +58,7 @@ class WorkerThread(QThread):
         self.comfyui_url = comfyui_url  # 全局 ComfyUI 地址
         self.source_path = source_path  # 全局图片源路径
         self.stage1_results = {}
-        self.stage1_output_dir = None
+        self.stage1_output_dir = stage1_output_dir  # Global stage1 output path from config
         self.should_stop = False
         self.report_aggregator = {}  # {folder_name: {"Image 1": link, "Image 2": link, ...}}
         self.folder_image_counts = {}  # {folder_name: current_count}
@@ -118,11 +118,17 @@ class WorkerThread(QThread):
                 for img_idx, img_path in enumerate(images):
                     row_data = task_rows[min(idx, len(task_rows)-1)] if task_rows else {}
                     
+                    excel_stage1_dir = None
+                    if 'Processed image 1stage' in row_data and pd.notna(row_data.get('Processed image 1stage')):
+                        excel_stage1_dir = str(row_data.get('Processed image 1stage')).strip()
+                        if excel_stage1_dir.lower() == 'nan':
+                            excel_stage1_dir = None
+
                     task_info = {
                         'source_path': img_path,
                         'img_name': os.path.basename(img_path),
                         'folder_rel_path': folder_rel,
-                        'stage1_dir': str(row_data.get('Processed image 1stage', '')) if pd.notna(row_data.get('Processed image 1stage')) else None,
+                        'stage1_dir': excel_stage1_dir,
                         'jp_top': str(row_data.get('Top Text JP', '')) if pd.notna(row_data.get('Top Text JP')) else '',
                         'jp_bottom': str(row_data.get('Bottom Text JP', '')) if pd.notna(row_data.get('Bottom Text JP')) else '',
                         'top_size': int(float(row_data.get('Top Font Size', 0))) if pd.notna(row_data.get('Top Font Size')) else 0,
@@ -142,24 +148,35 @@ class WorkerThread(QThread):
             
         # 使用全局 ComfyUI 地址
         global_comfyui_url = self.comfyui_url
-        global_stage1_dir = None
-        for task in all_tasks:
-            if task['stage1_dir']:
-                global_stage1_dir = task['stage1_dir']
-                break
+        global_stage1_dir = (self.stage1_output_dir or "").strip()
+        stage1_dir_from = "Config"
+        if not global_stage1_dir:
+            for task in all_tasks:
+                if task['stage1_dir']:
+                    global_stage1_dir = task['stage1_dir']
+                    stage1_dir_from = "Excel"
+                    break
 
         if not global_comfyui_url:
-            self.error_occurred.emit("未配置 ComfyUI 地址！请在「配置」页面设置 ComfyUI 全局端口")
+            self.error_occurred.emit("ComfyUI URL is not configured. Please set it in the Config page.")
             return
         if not global_stage1_dir:
-            self.error_occurred.emit("未找到输出目录配置！请确保Excel中配置了 Processed image 1stage 列")
+            self.error_occurred.emit("Stage1 output directory is missing. Please set it in Config (legacy fallback: Excel column 'Processed image 1stage').")
             return
-        
+        if os.path.isfile(global_stage1_dir):
+            self.error_occurred.emit(f"Stage1 output path is a file, not a folder: {global_stage1_dir}")
+            return
+        try:
+            ensure_dir(global_stage1_dir)
+        except Exception as e:
+            self.error_occurred.emit(f"Failed to create stage1 output directory: {e}")
+            return
+
         self.stage1_output_dir = global_stage1_dir
-        self.log(f"输出目录: {global_stage1_dir}")
-        self.log(f"总任务数: {len(all_tasks)}")
-        
-        # 初始化ComfyUI客户端
+        self.log(f"Output directory ({stage1_dir_from}): {global_stage1_dir}")
+        self.log(f"Total tasks: {len(all_tasks)}")
+
+        # Initialize ComfyUI client
         try:
             comfyui_client = ComfyUIClient.from_url(global_comfyui_url)
             self.log(f"✓ 已连接ComfyUI")
@@ -532,8 +549,8 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         """Initialize UI with left sidebar navigation and right content area."""
         self.setWindowTitle(f"\u56fe\u7247\u5904\u7406\u5de5\u5177 v{APP_VERSION}")
-        self.setMinimumSize(1024, 700)
-        self.resize(1200, 760)
+        self.setMinimumSize(1400, 900)
+        self.resize(1600, 1000)
 
         central_widget = QWidget()
         central_widget.setObjectName("appRoot")
@@ -849,7 +866,43 @@ class MainWindow(QMainWindow):
 
         info_layout.addWidget(source_group)
 
-        # ========== 阿里云 OSS 配置显示（只读）==========
+
+        # ========== Stage1 Output Path ==========
+        stage1_dir_group = QGroupBox("Stage1 Output Path（阶段1输出路径）")
+        stage1_dir_group.setObjectName("configGroup")
+        stage1_dir_form = QHBoxLayout(stage1_dir_group)
+        stage1_dir_form.setContentsMargins(12, 12, 12, 12)
+
+        stage1_dir_label = QLabel("Output Path（输出路径）:")
+        stage1_dir_label.setObjectName("configLabel")
+        stage1_dir_form.addWidget(stage1_dir_label)
+
+        self.stage1_output_input = QLineEdit()
+        self.stage1_output_input.setObjectName("configInput")
+        self.stage1_output_input.setMinimumHeight(36)
+        self.stage1_output_input.setPlaceholderText("请选择阶段1输出文件夹路径...")
+        saved_stage1_output = parser.get("Paths", "Stage1OutputPath", fallback="")
+        if saved_stage1_output:
+            self.stage1_output_input.setText(saved_stage1_output)
+        stage1_dir_form.addWidget(self.stage1_output_input, 1)
+
+        self.browse_stage1_output_btn = QPushButton("Browse")
+        self.browse_stage1_output_btn.setObjectName("testConfigBtn")
+        self.browse_stage1_output_btn.setMinimumHeight(36)
+        self.browse_stage1_output_btn.setMinimumWidth(72)
+        self.browse_stage1_output_btn.clicked.connect(self._browse_stage1_output_dir)
+        stage1_dir_form.addWidget(self.browse_stage1_output_btn)
+
+        self.save_stage1_output_btn = QPushButton("Save")
+        self.save_stage1_output_btn.setObjectName("saveConfigBtn")
+        self.save_stage1_output_btn.setMinimumHeight(36)
+        self.save_stage1_output_btn.setMinimumWidth(72)
+        self.save_stage1_output_btn.clicked.connect(self._save_stage1_output_dir)
+        stage1_dir_form.addWidget(self.save_stage1_output_btn)
+
+        info_layout.addWidget(stage1_dir_group)
+
+
         oss_group = QGroupBox("阿里云 OSS 配置")
         oss_group.setObjectName("configGroup")
         oss_form_layout = QVBoxLayout(oss_group)
@@ -1131,11 +1184,24 @@ class MainWindow(QMainWindow):
         if mode == 'stage2' and self.worker and self.worker.stage1_results:
             old_results = self.worker.stage1_results
             old_output_dir = self.worker.stage1_output_dir
-            self.worker = WorkerThread(mode, self.task_file, comfyui_url=self.get_comfyui_url(), source_path=self.get_source_path())
+            self.worker = WorkerThread(
+                mode,
+                self.task_file,
+                comfyui_url=self.get_comfyui_url(),
+                source_path=self.get_source_path(),
+                stage1_output_dir=self.get_stage1_output_dir(),
+            )
             self.worker.stage1_results = old_results
             self.worker.stage1_output_dir = old_output_dir
         else:
-            self.worker = WorkerThread(mode, self.task_file, manual_dir, comfyui_url=self.get_comfyui_url(), source_path=self.get_source_path())
+            self.worker = WorkerThread(
+                mode,
+                self.task_file,
+                manual_dir,
+                comfyui_url=self.get_comfyui_url(),
+                source_path=self.get_source_path(),
+                stage1_output_dir=self.get_stage1_output_dir(),
+            )
 
         self.worker.progress_updated.connect(self.update_progress)
         self.worker.log_message.connect(self.append_log)
@@ -1518,6 +1584,47 @@ class MainWindow(QMainWindow):
         with open(config_path, "w", encoding="utf-8") as f:
             parser.write(f)
         QMessageBox.information(self, "保存成功", f"图片源路径已保存: {path}")
+
+    # ---- Stage1 Output Path Config ----
+
+    def get_stage1_output_dir(self) -> str:
+        """Return configured stage1 output directory."""
+        if not hasattr(self, "stage1_output_input"):
+            return ""
+        return self.stage1_output_input.text().strip()
+
+    def _browse_stage1_output_dir(self):
+        """Open folder chooser for stage1 output directory."""
+        default_dir = self.get_stage1_output_dir() or self.get_source_path() or ""
+        folder = QFileDialog.getExistingDirectory(self, "Select stage1 output folder", default_dir)
+        if folder:
+            self.stage1_output_input.setText(folder)
+
+    def _save_stage1_output_dir(self):
+        """Save stage1 output directory into config.ini."""
+        path = self.get_stage1_output_dir()
+        if not path:
+            QMessageBox.warning(self, "Warning", "Please input or choose stage1 output directory")
+            return
+        if os.path.isfile(path):
+            QMessageBox.warning(self, "Warning", f"Path is a file, not a folder: {path}")
+            return
+        try:
+            os.makedirs(path, exist_ok=True)
+        except Exception as e:
+            QMessageBox.warning(self, "Warning", f"Failed to create directory: {e}")
+            return
+
+        config_path = Path(__file__).parent / "config.ini"
+        parser = configparser.ConfigParser()
+        if config_path.exists():
+            parser.read(config_path, encoding="utf-8")
+        if not parser.has_section("Paths"):
+            parser.add_section("Paths")
+        parser.set("Paths", "Stage1OutputPath", path)
+        with open(config_path, "w", encoding="utf-8") as f:
+            parser.write(f)
+        QMessageBox.information(self, "Saved", f"Stage1 output path saved: {path}")
 
     def _check_for_updates(self, silent=True):
         """Check updates in background; show dialogs only when silent=False."""

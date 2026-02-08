@@ -28,6 +28,7 @@ def main():
     input_task_file = config["Paths"]["InputTaskFile"]
     output_report_file = config["Paths"]["OutputReportFile"]
     source_path = config.get("Paths", "SourcePath", fallback="")
+    stage1_output_path = config.get("Paths", "Stage1OutputPath", fallback="").strip()
 
     if not source_path:
         logger.error("未配置图片源路径！请在 config.ini [Paths] 中设置 SourcePath")
@@ -239,16 +240,28 @@ def main():
     comfyui_port = config.get("ComfyUI", "DefaultPort", fallback="8188")
     global_comfyui_url = f"http://{comfyui_host}:{comfyui_port}"
 
-    global_stage1_dir = None
-    for task in all_tasks:
-        if task['stage1_dir']:
-            global_stage1_dir = task['stage1_dir']
-            break
+    global_stage1_dir = stage1_output_path
+    stage1_dir_from = "config"
+    if not global_stage1_dir:
+        for task in all_tasks:
+            if task['stage1_dir']:
+                global_stage1_dir = task['stage1_dir']
+                stage1_dir_from = "excel"
+                break
 
     if not global_stage1_dir:
-        logger.error("未找到输出目录配置！请确保Excel中配置了 Processed image 1stage 列")
+        logger.error("Stage1 output directory not found. Please set [Paths].Stage1OutputPath in config.ini (legacy fallback: Excel column 'Processed image 1stage').")
         return
-    
+    if os.path.isfile(global_stage1_dir):
+        logger.error(f"Stage1 output path is a file, not a folder: {global_stage1_dir}")
+        return
+    try:
+        ensure_dir(global_stage1_dir)
+    except Exception as e:
+        logger.error(f"Failed to create stage1 output directory: {e}")
+        return
+
+    logger.info(f"Stage1 output directory source: {stage1_dir_from}")
     logger.info(f"ComfyUI服务器: {global_comfyui_url}")
     logger.info(f"Stage1输出目录: {global_stage1_dir}")
     logger.info(f"需要处理的图片总数: {len(all_tasks)}")
