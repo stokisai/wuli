@@ -4,7 +4,8 @@
 Flow:
 1) Check latest GitHub Release
 2) Download .zip package
-3) Run update script (wait old process -> extract -> copy -> restart)
+3) Verify package integrity
+4) Run update script (wait old process -> extract -> copy -> restart)
 """
 
 import os
@@ -57,6 +58,8 @@ class ReleaseInfo:
     download_url: str
     changelog: str
     html_url: str
+    asset_name: str = ""
+    asset_size: int = 0
 
 
 def is_frozen() -> bool:
@@ -117,10 +120,15 @@ class UpdateCheckWorker(QThread):
 
             assets = data.get("assets", [])
             download_url = ""
+            asset_name = ""
+            asset_size = 0
+
             for asset in assets:
                 name = (asset.get("name") or "").lower()
                 if name.endswith(".zip"):
                     download_url = asset.get("browser_download_url", "")
+                    asset_name = asset.get("name", "")
+                    asset_size = int(asset.get("size") or 0)
                     break
 
             if not download_url:
@@ -138,8 +146,10 @@ class UpdateCheckWorker(QThread):
             info = ReleaseInfo(
                 version=remote_ver,
                 download_url=download_url,
-                changelog=data.get("body", "") or "No changelog provided.",
+                changelog=(data.get("body", "") or "No changelog provided.").replace("\\n", "\n"),
                 html_url=data.get("html_url", ""),
+                asset_name=asset_name,
+                asset_size=asset_size,
             )
             self.update_available.emit(info)
 
@@ -152,16 +162,17 @@ class UpdateCheckWorker(QThread):
 
 
 class DownloadWorker(QThread):
-    """Background ZIP downloader with progress."""
+    """Background ZIP downloader with progress and integrity checks."""
 
     progress = Signal(int, int)  # downloaded_bytes, total_bytes
     download_complete = Signal(str)
     download_failed = Signal(str)
 
-    def __init__(self, url: str, save_path: str, parent=None):
+    def __init__(self, url: str, save_path: str, expected_size: int = 0, parent=None):
         super().__init__(parent)
         self.url = url
         self.save_path = save_path
+        self.expected_size = int(expected_size or 0)
         self._cancelled = False
 
     def cancel(self):
@@ -169,7 +180,12 @@ class DownloadWorker(QThread):
 
     def run(self):
         try:
-            resp = requests.get(self.url, stream=True, timeout=30)
+            resp = requests.get(
+                self.url,
+                stream=True,
+                timeout=30,
+                headers={"User-Agent": "ImageProcessingTool-Updater"},
+            )
             resp.raise_for_status()
             total = int(resp.headers.get("content-length", 0))
             downloaded = 0
@@ -186,6 +202,21 @@ class DownloadWorker(QThread):
                     downloaded += len(chunk)
                     self.progress.emit(downloaded, total)
 
+            # Check download completeness.
+            if self.expected_size > 0 and downloaded != self.expected_size:
+                self._cleanup()
+                self.download_failed.emit(
+                    f"Downloaded size mismatch (expected {self.expected_size}, got {downloaded})"
+                )
+                return
+
+            if total > 0 and downloaded != total:
+                self._cleanup()
+                self.download_failed.emit(
+                    f"Downloaded size mismatch (content-length {total}, got {downloaded})"
+                )
+                return
+
             self.download_complete.emit(self.save_path)
         except Exception as e:
             self._cleanup()
@@ -199,42 +230,53 @@ class DownloadWorker(QThread):
             pass
 
 
-def extract_update(zip_path: str) -> str:
-    """Extract zip to temp and return extraction root."""
-    extract_dir = os.path.join(tempfile.gettempdir(), "_ota_extract")
-    if os.path.exists(extract_dir):
-        shutil.rmtree(extract_dir)
+def validate_update_zip(zip_path: str) -> tuple[bool, str]:
+    """Validate downloaded update package before applying it."""
+    if not os.path.exists(zip_path):
+        return False, "更新包文件不存在。"
 
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(extract_dir)
+    size = os.path.getsize(zip_path)
+    if size <= 0:
+        return False, "更新包大小为 0，文件无效。"
 
-    items = os.listdir(extract_dir)
-    if len(items) == 1:
-        single = os.path.join(extract_dir, items[0])
-        if os.path.isdir(single):
-            return single
-    return extract_dir
+    if not zipfile.is_zipfile(zip_path):
+        return False, "更新包不是有效的 ZIP 文件。"
 
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            bad = zf.testzip()
+            if bad:
+                return False, f"更新包损坏（CRC 失败）: {bad}"
+            names = [n for n in zf.namelist() if n and not n.endswith("/")]
+            if not names:
+                return False, "更新包为空。"
+            exe_files = [n for n in names if n.lower().endswith(".exe")]
+            if not exe_files:
+                return False, "更新包中未找到可执行文件（.exe）。"
+    except Exception as e:
+        return False, f"无法读取更新包: {e}"
 
-def apply_files(source_dir: str, target_dir: str):
-    """Copy all files from source_dir to target_dir."""
-    for item in os.listdir(source_dir):
-        src = os.path.join(source_dir, item)
-        dst = os.path.join(target_dir, item)
-        if os.path.isdir(src):
-            if os.path.exists(dst):
-                shutil.rmtree(dst)
-            shutil.copytree(src, dst)
-        else:
-            shutil.copy2(src, dst)
+    return True, ""
 
 
 def _build_update_cmd_script(zip_path: str, app_dir: str, pid: int) -> str:
     """Build cmd script text that performs update after current process exits."""
     if is_frozen():
-        restart_cmd = f'start "" "{os.path.join(app_dir, os.path.basename(sys.executable))}"'
+        current_exe = os.path.basename(sys.executable)
+        restart_cmd = f'start "" "%APP_DIR%\\{current_exe}"'
+        exe_mapping = f"""
+if not exist "%SRC_DIR%\\{current_exe}" (
+  for /f "delims=" %%f in ('dir /b "%SRC_DIR%\\*.exe" 2^>nul') do (
+    echo [Update] Mapping exe %%f -> {current_exe}
+    copy /Y "%SRC_DIR%\\%%f" "%APP_DIR%\\{current_exe}" >nul
+    goto EXE_MAP_DONE
+  )
+)
+:EXE_MAP_DONE
+"""
     else:
         restart_cmd = f'start "" "{sys.executable}" "{os.path.join(app_dir, "gui_app.py")}"'
+        exe_mapping = ""
 
     script = f'''@echo off
 chcp 65001 >nul
@@ -276,6 +318,8 @@ if errorlevel 1 (
   pause
   goto END
 )
+
+{exe_mapping}
 
 echo [Update] Restarting app...
 {restart_cmd}
@@ -424,7 +468,11 @@ class UpdateDialog(QDialog):
             filename = f"update_v{self.release_info.version}.zip"
         self._zip_path = os.path.join(tempfile.gettempdir(), filename)
 
-        self.download_worker = DownloadWorker(self.release_info.download_url, self._zip_path)
+        self.download_worker = DownloadWorker(
+            self.release_info.download_url,
+            self._zip_path,
+            expected_size=self.release_info.asset_size,
+        )
         self.download_worker.progress.connect(self._on_progress)
         self.download_worker.download_complete.connect(self._on_complete)
         self.download_worker.download_failed.connect(self._on_failed)
@@ -454,6 +502,10 @@ class UpdateDialog(QDialog):
         self.progress_bar.setValue(self.progress_bar.maximum())
         self.status_label.setText("下载完成，正在准备安装...")
         try:
+            ok, reason = validate_update_zip(zip_path)
+            if not ok:
+                raise RuntimeError(reason)
+
             apply_update_and_restart(zip_path)
             QApplication.quit()
         except Exception as e:
@@ -468,8 +520,7 @@ class UpdateDialog(QDialog):
         self.status_label.setText(f"下载失败: {error}")
         self.update_btn.setEnabled(True)
         self.update_btn.setText("重试")
-        self.skip_btn.setText("取消")
+        self.skip_btn.setText("关闭")
         self.skip_btn.clicked.disconnect()
         self.skip_btn.clicked.connect(self.reject)
         self.progress_bar.setVisible(False)
-
