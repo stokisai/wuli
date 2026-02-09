@@ -1,15 +1,16 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
-图片处理工具 GUI - v1.2.0
+图片处理工具 GUI - v1.1.2
 为客户提供简单易用的图片处理工具
 """
 
 # 版本信息
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
 import os
+import math
 import shutil
 import subprocess
 import threading
@@ -21,10 +22,11 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QTableWidget, QTableWidgetItem,
     QProgressBar, QTextEdit, QFrame, QSplitter, QMessageBox,
     QHeaderView, QGroupBox, QSizePolicy, QScrollArea, QCheckBox,
-    QStackedWidget, QLineEdit, QFormLayout, QComboBox, QInputDialog
+    QStackedWidget, QLineEdit, QFormLayout, QComboBox, QInputDialog,
+    QDialog, QGridLayout
 )
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QObject
-from PySide6.QtGui import QFont, QColor, QPalette, QDesktopServices, QIcon, QBrush, QTextCursor
+from PySide6.QtGui import QFont, QColor, QPalette, QDesktopServices, QIcon, QBrush, QTextCursor, QPixmap
 
 import pandas as pd
 import configparser
@@ -184,7 +186,11 @@ class WorkerThread(QThread):
             if self.workflow_path:
                 comfyui_client.load_workflow(self.workflow_path)
                 self.log(f"✓ 已加载工作流: {os.path.basename(self.workflow_path)}")
-            self.log(f"✓ 已连接ComfyUI")
+            # 真正检查连接
+            if not comfyui_client.check_connection():
+                self.error_occurred.emit(f"无法连接ComfyUI服务器: {global_comfyui_url}")
+                return
+            self.log(f"✓ 已连接ComfyUI: {global_comfyui_url}")
         except Exception as e:
             self.error_occurred.emit(f"无法连接ComfyUI服务器: {e}")
             return
@@ -200,16 +206,19 @@ class WorkerThread(QThread):
                 return
             
             img_name_lower = task['img_name'].lower()
-            
-            # 规则A: 文件名包含 'a' -> 完全跳过
-            if 'a' in img_name_lower:
+            img_stem_lower = os.path.splitext(img_name_lower)[0]
+
+            # 规则A: 文件名(不含扩展名)为 'a' -> 完全跳过
+            if img_stem_lower == 'a':
+                self.progress_updated.emit(idx, len(all_tasks), f"跳过: {task['img_name']}")
                 self.log(f"⏭ ({idx}/{len(all_tasks)}) {task['img_name']} - 跳过(规则A)")
                 self.result_added.emit(task['folder_rel_path'], task['img_name'], "跳过A", "")
                 skipped_a_count += 1
                 continue
-            
-            # 规则B: 文件名包含 'b' -> 跳过ComfyUI，复制原图到Stage1文件夹
-            if 'b' in img_name_lower:
+
+            # 规则B: 文件名(不含扩展名)为 'b' -> 跳过ComfyUI，复制原图到Stage1文件夹
+            if img_stem_lower == 'b':
+                self.progress_updated.emit(idx, len(all_tasks), f"复制: {task['img_name']}")
                 # 创建Stage1子文件夹并复制原图
                 stage1_subfolder = os.path.join(global_stage1_dir, task['folder_rel_path'])
                 ensure_dir(stage1_subfolder)
@@ -562,9 +571,397 @@ class ComfyUIConnectionTestWorker(QThread):
         except Exception as e:
             self.check_finished.emit(False, self.url, f"连接异常: {e}")
 
+class ClickableLabel(QLabel):
+    """可点击的图片标签"""
+    clicked = Signal(str)
+
+    def __init__(self, image_path="", parent=None):
+        super().__init__(parent)
+        self._image_path = image_path
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._image_path:
+            self.clicked.emit(self._image_path)
+        super().mousePressEvent(event)
+
+
+class ThumbnailLoader(QThread):
+    """后台加载缩略图线程"""
+    thumbnail_ready = Signal(int, object)  # index, QPixmap
+
+    def __init__(self, image_paths, size=280, parent=None):
+        super().__init__(parent)
+        self.image_paths = image_paths
+        self.size = size
+
+    def run(self):
+        for idx, path in enumerate(self.image_paths):
+            try:
+                pixmap = QPixmap(path)
+                if not pixmap.isNull():
+                    pixmap = pixmap.scaled(
+                        self.size, self.size,
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                self.thumbnail_ready.emit(idx, pixmap)
+            except Exception:
+                self.thumbnail_ready.emit(idx, QPixmap())
+
+
+class ImagePreviewDialog(QDialog):
+    """大图预览窗口"""
+
+    def __init__(self, image_path, parent=None):
+        super().__init__(parent)
+        self.setObjectName("imagePreviewDialog")
+        self.setWindowTitle(os.path.basename(image_path))
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setAlignment(Qt.AlignCenter)
+
+        img_label = QLabel()
+        pixmap = QPixmap(image_path)
+        if not pixmap.isNull():
+            screen = self.screen()
+            if screen:
+                avail = screen.availableGeometry()
+                max_w = int(avail.width() * 0.85)
+                max_h = int(avail.height() * 0.85)
+            else:
+                max_w, max_h = 1200, 800
+            pixmap = pixmap.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        img_label.setPixmap(pixmap)
+        img_label.setAlignment(Qt.AlignCenter)
+        scroll.setWidget(img_label)
+        layout.addWidget(scroll, 1)
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn, 0, Qt.AlignRight)
+
+        self.resize(pixmap.width() + 40, pixmap.height() + 80)
+
+
+class ReprocessWorkerThread(QThread):
+    """用新工作流重新处理选中图片"""
+    progress_updated = Signal(int, int, str)  # current, total, message
+    image_done = Signal(str, bool)  # output_path, success
+    all_done = Signal(bool)  # overall success
+
+    def __init__(self, selected_outputs, source_map, comfyui_url, workflow_path, parent=None):
+        super().__init__(parent)
+        self.selected_outputs = selected_outputs  # list of output paths
+        self.source_map = source_map  # {output_path: source_path}
+        self.comfyui_url = comfyui_url
+        self.workflow_path = workflow_path
+        self.should_stop = False
+
+    def run(self):
+        try:
+            client = ComfyUIClient.from_url(self.comfyui_url)
+            if self.workflow_path:
+                client.load_workflow(self.workflow_path)
+            if not client.check_connection():
+                self.all_done.emit(False)
+                return
+
+            total = len(self.selected_outputs)
+            success_count = 0
+            for idx, output_path in enumerate(self.selected_outputs, 1):
+                if self.should_stop:
+                    break
+                source_path = self.source_map.get(output_path, "")
+                if not source_path or not os.path.exists(source_path):
+                    self.progress_updated.emit(idx, total, f"源文件缺失: {os.path.basename(output_path)}")
+                    self.image_done.emit(output_path, False)
+                    continue
+
+                self.progress_updated.emit(idx, total, os.path.basename(output_path))
+                ok = client.process_image(source_path, output_path)
+                self.image_done.emit(output_path, ok)
+                if ok:
+                    success_count += 1
+
+            self.all_done.emit(success_count == total)
+        except Exception as e:
+            logger.exception("ReprocessWorkerThread error")
+            self.all_done.emit(False)
+
+    def stop(self):
+        self.should_stop = True
+
+
+class ImageGalleryDialog(QDialog):
+    """Stage1 图库预览 + 选图重处理"""
+
+    def __init__(self, image_paths, source_map, comfyui_url,
+                 current_workflow_name, workflows_dir, parent=None):
+        super().__init__(parent)
+        self.setObjectName("galleryDialog")
+        self.setWindowTitle("图库 - Stage1 输出结果")
+        self.setModal(True)
+        self.resize(1100, 800)
+
+        self._image_paths = list(image_paths)
+        self._source_map = dict(source_map)
+        self._comfyui_url = comfyui_url
+        self._current_workflow_name = current_workflow_name
+        self._workflows_dir = Path(workflows_dir)
+        self._checkboxes = []
+        self._thumb_labels = []
+        self._reprocess_worker = None
+
+        self._build_ui()
+        self._build_gallery_grid()
+        self._start_thumbnail_loader(self._image_paths)
+
+    # ---- UI construction ----
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+        root.setContentsMargins(16, 16, 16, 16)
+
+        # Title
+        title = QLabel("图库 - Stage1 输出结果")
+        title.setObjectName("pageTitle")
+        root.addWidget(title)
+
+        # Stats bar
+        stats_bar = QHBoxLayout()
+        self._total_label = QLabel(f"共 {len(self._image_paths)} 张")
+        self._total_label.setObjectName("sectionLabel")
+        stats_bar.addWidget(self._total_label)
+
+        self._selected_label = QLabel("已选择: 0 张")
+        self._selected_label.setObjectName("sectionLabel")
+        stats_bar.addWidget(self._selected_label)
+
+        stats_bar.addStretch()
+        select_all_btn = QPushButton("全选")
+        select_all_btn.clicked.connect(self._select_all)
+        stats_bar.addWidget(select_all_btn)
+
+        deselect_all_btn = QPushButton("取消全选")
+        deselect_all_btn.clicked.connect(self._deselect_all)
+        stats_bar.addWidget(deselect_all_btn)
+        root.addLayout(stats_bar)
+
+        # Scroll area for gallery grid
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setObjectName("galleryScroll")
+        self._grid_widget = QWidget()
+        self._grid_layout = QGridLayout(self._grid_widget)
+        self._grid_layout.setSpacing(12)
+        self._scroll.setWidget(self._grid_widget)
+        root.addWidget(self._scroll, 1)
+
+        # Reprocess frame
+        reprocess_frame = QFrame()
+        reprocess_frame.setObjectName("reprocessFrame")
+        rp_layout = QVBoxLayout(reprocess_frame)
+        rp_layout.setContentsMargins(12, 12, 12, 12)
+        rp_layout.setSpacing(8)
+
+        wf_row = QHBoxLayout()
+        wf_row.addWidget(QLabel("工作流:"))
+        self._wf_combo = QComboBox()
+        self._wf_combo.setObjectName("configInput")
+        self._wf_combo.setMinimumHeight(32)
+        self._populate_workflow_combo()
+        wf_row.addWidget(self._wf_combo, 1)
+        rp_layout.addLayout(wf_row)
+
+        hint = QLabel(f"当前使用: {self._current_workflow_name}  |  建议尝试其他工作流")
+        hint.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        rp_layout.addWidget(hint)
+
+        action_row = QHBoxLayout()
+        self._reprocess_btn = QPushButton("重新处理选中图片 (0 张)")
+        self._reprocess_btn.setObjectName("reprocessBtn")
+        self._reprocess_btn.setMinimumHeight(38)
+        self._reprocess_btn.clicked.connect(self._on_reprocess)
+        action_row.addWidget(self._reprocess_btn)
+
+        self._rp_progress = QProgressBar()
+        self._rp_progress.setTextVisible(True)
+        self._rp_progress.setFormat("%p%")
+        self._rp_progress.setVisible(False)
+        action_row.addWidget(self._rp_progress, 1)
+        rp_layout.addLayout(action_row)
+
+        root.addWidget(reprocess_frame)
+
+        # Bottom buttons
+        bottom = QHBoxLayout()
+        bottom.addStretch()
+        save_btn = QPushButton("保存关闭")
+        save_btn.setObjectName("saveConfigBtn")
+        save_btn.setMinimumHeight(36)
+        save_btn.clicked.connect(self._on_save)
+        bottom.addWidget(save_btn)
+        root.addLayout(bottom)
+
+    def _populate_workflow_combo(self):
+        self._wf_combo.clear()
+        names = sorted(p.stem for p in self._workflows_dir.glob("*.json"))
+        self._wf_combo.addItems(names)
+        # Try to select a different workflow than current
+        for i, n in enumerate(names):
+            if n != self._current_workflow_name:
+                self._wf_combo.setCurrentIndex(i)
+                break
+
+    def _build_gallery_grid(self):
+        """Build 3-column grid of image cards."""
+        # Clear existing
+        while self._grid_layout.count():
+            item = self._grid_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        self._checkboxes.clear()
+        self._thumb_labels.clear()
+
+        cols = 3
+        for idx, path in enumerate(self._image_paths):
+            row, col = divmod(idx, cols)
+
+            cell = QFrame()
+            cell.setObjectName("galleryCell")
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(8, 8, 8, 8)
+            cell_layout.setSpacing(4)
+
+            cb = QCheckBox()
+            cb.setObjectName("galleryCheckbox")
+            cb.stateChanged.connect(self._on_checkbox_changed)
+            self._checkboxes.append(cb)
+            cell_layout.addWidget(cb)
+
+            thumb = ClickableLabel(path)
+            thumb.setFixedSize(280, 280)
+            thumb.setAlignment(Qt.AlignCenter)
+            thumb.setText("加载中...")
+            thumb.setStyleSheet("color: #94a3b8;")
+            thumb.clicked.connect(self._on_image_clicked)
+            self._thumb_labels.append(thumb)
+            cell_layout.addWidget(thumb, 0, Qt.AlignCenter)
+
+            name_label = QLabel(os.path.basename(path))
+            name_label.setAlignment(Qt.AlignCenter)
+            name_label.setWordWrap(True)
+            name_label.setStyleSheet("color: #cbd5e1; font-size: 12px;")
+            cell_layout.addWidget(name_label)
+
+            self._grid_layout.addWidget(cell, row, col)
+
+    def _start_thumbnail_loader(self, paths):
+        self._thumb_loader = ThumbnailLoader(paths, size=280, parent=self)
+        self._thumb_loader.thumbnail_ready.connect(self._on_thumbnail_ready)
+        self._thumb_loader.start()
+
+    # ---- Slots ----
+
+    def _on_thumbnail_ready(self, idx, pixmap):
+        if 0 <= idx < len(self._thumb_labels):
+            label = self._thumb_labels[idx]
+            if pixmap and not pixmap.isNull():
+                label.setPixmap(pixmap)
+                label.setText("")
+            else:
+                label.setText("加载失败")
+
+    def _on_image_clicked(self, path):
+        dlg = ImagePreviewDialog(path, self)
+        dlg.exec()
+
+    def _on_checkbox_changed(self):
+        count = sum(1 for cb in self._checkboxes if cb.isChecked())
+        self._selected_label.setText(f"已选择: {count} 张")
+        self._reprocess_btn.setText(f"重新处理选中图片 ({count} 张)")
+
+    def _select_all(self):
+        for cb in self._checkboxes:
+            cb.setChecked(True)
+
+    def _deselect_all(self):
+        for cb in self._checkboxes:
+            cb.setChecked(False)
+
+    def _on_reprocess(self):
+        selected = [
+            self._image_paths[i]
+            for i, cb in enumerate(self._checkboxes)
+            if cb.isChecked()
+        ]
+        if not selected:
+            QMessageBox.information(self, "提示", "请先勾选需要重新处理的图片")
+            return
+
+        wf_name = self._wf_combo.currentText()
+        if not wf_name:
+            QMessageBox.warning(self, "警告", "请选择一个工作流")
+            return
+        wf_path = str(self._workflows_dir / f"{wf_name}.json")
+
+        self._reprocess_btn.setEnabled(False)
+        self._rp_progress.setVisible(True)
+        self._rp_progress.setValue(0)
+        self._rp_progress.setMaximum(len(selected))
+
+        self._reprocess_worker = ReprocessWorkerThread(
+            selected, self._source_map, self._comfyui_url, wf_path, self
+        )
+        self._reprocess_worker.progress_updated.connect(self._on_rp_progress)
+        self._reprocess_worker.all_done.connect(self._on_reprocess_complete)
+        self._reprocess_worker.start()
+
+    def _on_rp_progress(self, current, total, msg):
+        self._rp_progress.setMaximum(total)
+        self._rp_progress.setValue(current)
+
+    def _on_reprocess_complete(self, success):
+        self._reprocess_btn.setEnabled(True)
+        self._rp_progress.setVisible(False)
+        self._reprocess_worker = None
+
+        if success:
+            QMessageBox.information(self, "完成", "选中图片已全部重新处理！")
+        else:
+            QMessageBox.warning(self, "提示", "部分图片重新处理失败，请检查日志。")
+
+        # Refresh gallery showing only reprocessed images
+        reprocessed = [
+            self._image_paths[i]
+            for i, cb in enumerate(self._checkboxes)
+            if cb.isChecked()
+        ]
+        self._refresh_gallery(reprocessed)
+
+    def _refresh_gallery(self, paths):
+        """Rebuild gallery with a new set of paths."""
+        self._image_paths = list(paths)
+        self._total_label.setText(f"共 {len(self._image_paths)} 张")
+        self._build_gallery_grid()
+        self._start_thumbnail_loader(self._image_paths)
+        self._on_checkbox_changed()
+
+    def _on_save(self):
+        self.accept()
+
+
 class MainWindow(QMainWindow):
     """主窗口"""
-    
+
     def __init__(self):
         super().__init__()
         self.worker = None
@@ -579,6 +976,7 @@ class MainWindow(QMainWindow):
         self._gui_log_handler = None
         self._runtime_log_max_lines = 6000
         self._last_progress_marker = None
+        self._stage1_workflow_name = ""
 
         self.init_ui()
         self._init_runtime_log_capture()
@@ -698,7 +1096,6 @@ class MainWindow(QMainWindow):
 
         self.auto_btn = QPushButton("\u5168\u6d41\u7a0b\u81ea\u52a8\n\u65e0\u9700\u786e\u8ba4")
         self.auto_btn.setObjectName("autoBtn")
-        self.auto_btn.setProperty("primary", True)
         self.auto_btn.setMinimumHeight(54)
         self.auto_btn.clicked.connect(self.run_full_auto)
         self.auto_btn.setEnabled(False)
@@ -730,8 +1127,16 @@ class MainWindow(QMainWindow):
 
         self.indicator_timer = QTimer()
         self.indicator_timer.timeout.connect(self.animate_indicator)
-        self.indicator_colors = ["#9aa4af"]
-        self.indicator_index = 0
+        self._pulse_step = 0
+        self._running_btn = None
+        self._btn_pulse_on = False
+        # 每个按钮的呼吸灯颜色主题: (dim_bg, bright_bg, dim_border, bright_border)
+        self._btn_color_themes = {
+            'stage1Btn':       ((30, 58, 95),  (79, 140, 255), (45, 90, 142),  (122, 180, 255)),
+            'stage2Btn':       ((20, 83, 45),  (34, 197, 94),  (26, 122, 66),  (74, 222, 128)),
+            'autoBtn':         ((59, 31, 110), (139, 92, 246), (91, 58, 158),  (167, 139, 250)),
+            'manualStage2Btn': ((45, 55, 72),  (100, 130, 170),(74, 85, 104),  (140, 165, 200)),
+        }
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setObjectName("progressBar")
@@ -810,6 +1215,12 @@ class MainWindow(QMainWindow):
         self.open_report_folder_btn.clicked.connect(self.open_report_folder)
         btn_layout.addWidget(self.open_report_folder_btn)
 
+        self.gallery_btn = QPushButton("查看图库")
+        self.gallery_btn.setObjectName("openFolderBtn")
+        self.gallery_btn.clicked.connect(self._open_gallery)
+        self.gallery_btn.setVisible(False)
+        btn_layout.addWidget(self.gallery_btn)
+
         complete_layout.addLayout(btn_layout)
 
         main_layout.addWidget(self.complete_frame)
@@ -840,12 +1251,13 @@ class MainWindow(QMainWindow):
         self.comfyui_url_input.setPlaceholderText("例如: http://127.0.0.1:8188")
         self.comfyui_url_input.textChanged.connect(self._on_comfyui_url_changed)
 
-        # 读取 config.ini 默认值
+        # 读取 config.ini 已保存的值（无保存则留空）
         _, parser = self._read_runtime_config()
-        host = parser.get("ComfyUI", "Host", fallback="127.0.0.1")
-        port = parser.get("ComfyUI", "DefaultPort", fallback="8188")
-        scheme = "https" if port in ("443",) else "http"
-        self.comfyui_url_input.setText(f"{scheme}://{host}:{port}")
+        saved_host = parser.get("ComfyUI", "Host", fallback="")
+        saved_port = parser.get("ComfyUI", "DefaultPort", fallback="")
+        if saved_host and saved_port:
+            scheme = "https" if saved_port in ("443",) else "http"
+            self.comfyui_url_input.setText(f"{scheme}://{saved_host}:{saved_port}")
         comfyui_form.addWidget(self.comfyui_url_input, 1)
 
         self.test_comfyui_btn = QPushButton("测试连接")
@@ -1242,6 +1654,7 @@ class MainWindow(QMainWindow):
     def start_worker(self, mode, manual_dir=None):
         """??????"""
         logger.info(f"Start worker: mode={mode}, manual_dir={manual_dir}")
+        self._stage1_workflow_name = self.workflow_combo.currentText()
         self.set_buttons_enabled(False)
         self.complete_frame.setVisible(False)
         self.progress_bar.setValue(0)
@@ -1249,7 +1662,17 @@ class MainWindow(QMainWindow):
         # ????????????
         self.running_indicator.setVisible(True)
         self.stop_btn.setVisible(True)
-        self.indicator_timer.start(300)  # ?300ms????
+        self.indicator_timer.start(40)  # 40ms ≈ 25fps 平滑呼吸动画
+        self._pulse_step = 0
+
+        # 高亮当前运行的按钮
+        mode_btn_map = {
+            'stage1': self.stage1_btn,
+            'stage2': self.stage2_btn,
+            'full_auto': self.auto_btn,
+            'manual_stage2': self.manual_stage2_btn,
+        }
+        self._set_running_btn(mode_btn_map.get(mode))
 
         # ???stage2???????????
         if mode == 'stage2' and self.worker and self.worker.stage1_results:
@@ -1352,6 +1775,7 @@ class MainWindow(QMainWindow):
             # 阶段1不显示报告按钮
             self.open_report_btn.setVisible(False)
             self.open_report_folder_btn.setVisible(False)
+            self.gallery_btn.setVisible(True)
         elif stage_name in ("stage2", "manual_stage2"):
             self.complete_label.setText("✅ 全部完成！图片已上传到Google Drive。")
             self.output_path_label.setText(f"输出目录: {output_dir}")
@@ -1359,6 +1783,7 @@ class MainWindow(QMainWindow):
             # 阶段2显示报告按钮
             self.open_report_btn.setVisible(True)
             self.open_report_folder_btn.setVisible(True)
+            self.gallery_btn.setVisible(False)
     
     def on_report_saved(self, report_path):
         """报告保存完成"""
@@ -1373,18 +1798,88 @@ class MainWindow(QMainWindow):
     def on_worker_finished(self):
         """??????"""
         logger.info("Worker finished")
-        self.set_buttons_enabled(True)
         # ???????
         self.running_indicator.setVisible(False)
         self.stop_btn.setVisible(False)
         self.indicator_timer.stop()
+        self._set_running_btn(None)
+        # 先清除运行按钮状态，再启用按钮（避免 _set_running_btn 把按钮又禁用）
+        self.set_buttons_enabled(True)
         self.status_label.setText("\u5b8c\u6210")
     def animate_indicator(self):
-        """动画更新运行指示器颜色"""
-        self.indicator_index = (self.indicator_index + 1) % len(self.indicator_colors)
-        color = self.indicator_colors[self.indicator_index]
-        self.running_indicator.setStyleSheet(f"font-size: 18px; color: {color};")
+        """平滑正弦波呼吸灯动画"""
+        self._pulse_step += 1
+        # 正弦波: 周期约2.5秒 (2.5s / 0.04s = ~63 steps per half cycle)
+        t = math.sin(self._pulse_step * 0.05) * 0.5 + 0.5  # 0.0 ~ 1.0
+
+        # 运行指示器小圆点颜色
+        indicator_r = int(100 + 55 * t)
+        indicator_g = int(160 + 60 * t)
+        indicator_b = int(220 + 35 * t)
+        self.running_indicator.setStyleSheet(
+            f"font-size: 18px; color: rgb({indicator_r},{indicator_g},{indicator_b});"
+        )
+
+        # 呼吸脉冲: 平滑渐变按钮背景和边框
+        if self._running_btn:
+            obj_name = self._running_btn.objectName()
+            theme = self._btn_color_themes.get(obj_name)
+            if theme:
+                dim_bg, bright_bg, dim_bd, bright_bd = theme
+                bg = tuple(int(d + (b - d) * t) for d, b in zip(dim_bg, bright_bg))
+                bd = tuple(int(d + (b - d) * t) for d, b in zip(dim_bd, bright_bd))
+                self._running_btn.setStyleSheet(
+                    f"color: #ffffff; font-weight: 700;"
+                    f"background: rgb({bg[0]},{bg[1]},{bg[2]});"
+                    f"border: 2px solid rgb({bd[0]},{bd[1]},{bd[2]});"
+                    f"border-radius: 8px; padding: 8px 12px; min-height: 30px;"
+                )
+
+    def _set_running_btn(self, btn):
+        """设置/清除当前运行中的按钮高亮"""
+        if self._running_btn:
+            # 清除内联样式，恢复QSS主题样式
+            self._running_btn.setStyleSheet("")
+            self._running_btn.setProperty("running", False)
+            self._running_btn.style().unpolish(self._running_btn)
+            self._running_btn.style().polish(self._running_btn)
+            self._running_btn.setEnabled(False)
+        self._running_btn = btn
+        self._pulse_step = 0
+        if btn:
+            btn.setProperty("running", True)
+            btn.setEnabled(True)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
     
+    def _open_gallery(self):
+        """打开 Stage1 图库预览"""
+        if not self.worker or not self.worker.stage1_results:
+            QMessageBox.warning(self, "警告", "没有阶段1的处理结果！")
+            return
+
+        image_paths = []
+        source_map = {}  # output_path -> source_path
+        for src_path, info in self.worker.stage1_results.items():
+            out = info.get("output", "")
+            if out and os.path.isfile(out):
+                image_paths.append(out)
+                source_map[out] = src_path
+
+        if not image_paths:
+            QMessageBox.warning(self, "警告", "未找到有效的输出图片！")
+            return
+
+        dlg = ImageGalleryDialog(
+            image_paths=image_paths,
+            source_map=source_map,
+            comfyui_url=self.get_comfyui_url(),
+            current_workflow_name=self._stage1_workflow_name,
+            workflows_dir=str(self._get_workflows_dir()),
+            parent=self,
+        )
+        dlg.exec()
+
     def stop_processing(self):
         """停止处理并提示清理"""
         if not self.worker or not self.worker.isRunning():
@@ -1398,12 +1893,21 @@ class MainWindow(QMainWindow):
         self.running_indicator.setVisible(False)
         self.stop_btn.setVisible(False)
         self.indicator_timer.stop()
+        self._set_running_btn(None)
         self.status_label.setText("已停止")
         self.progress_bar.setValue(0)  # 重置进度条
         self.set_buttons_enabled(True)
         
-        # 获取当前输出目录
-        output_dir = self.current_output_dir or "temp_processed"
+        # 获取当前输出目录（优先从worker获取实际路径）
+        output_dir = self.current_output_dir
+        if not output_dir and self.worker and hasattr(self.worker, 'stage1_output_dir'):
+            output_dir = self.worker.stage1_output_dir
+        if not output_dir:
+            output_dir = self.get_stage1_output_dir() or self.get_source_path()
+        if not output_dir:
+            self.set_buttons_enabled(True)
+            return
+        self.current_output_dir = output_dir
         output_path = os.path.abspath(output_dir)
         
         # 提示清理对话框
@@ -1435,7 +1939,17 @@ class MainWindow(QMainWindow):
                 subprocess.run(['explorer', output_path])
             else:
                 QMessageBox.warning(self, "警告", f"目录不存在: {output_path}")
-    
+
+        # 停止后显示complete_frame，方便用户打开输出目录
+        if self.current_output_dir and os.path.exists(os.path.abspath(self.current_output_dir)):
+            self.complete_label.setText("⚠️ 任务已停止")
+            self.output_path_label.setText(f"输出目录: {output_path}")
+            self.report_label.setText("")
+            self.complete_frame.setVisible(True)
+            self.open_report_btn.setVisible(False)
+            self.open_report_folder_btn.setVisible(False)
+            self.gallery_btn.setVisible(False)
+
     def open_output_folder(self):
         """打开输出文件夹"""
         if self.current_output_dir:

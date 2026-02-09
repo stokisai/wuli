@@ -112,17 +112,73 @@ QPushButton#navButton[active="true"] {
     border: 1px solid #4f8cff;
 }
 
-QPushButton#autoBtn[primary="true"] {
-    color: #ffffff;
-    background: #4f8cff;
-    border: 1px solid #4f8cff;
+/* ========== Stage Button Distinct Colors ========== */
+
+/* Stage 1 - Blue */
+QPushButton#stage1Btn {
+    color: #e0edff;
+    background: #1e3a5f;
+    border: 1px solid #2d5a8e;
+}
+QPushButton#stage1Btn:hover {
+    background: #264a73;
+    border-color: #3b7ac2;
+}
+QPushButton#stage1Btn:disabled {
+    color: #7a9abb;
+    background: #1a2d45;
+    border-color: #253d58;
 }
 
-QPushButton#autoBtn[primary="true"]:hover,
-QPushButton#navButton[active="true"]:hover {
-    background: #5c97ff;
-    border-color: #5c97ff;
+/* Stage 2 - Emerald */
+QPushButton#stage2Btn {
+    color: #d1fae5;
+    background: #14532d;
+    border: 1px solid #1a7a42;
 }
+QPushButton#stage2Btn:hover {
+    background: #1a6b3a;
+    border-color: #22c55e;
+}
+QPushButton#stage2Btn:disabled {
+    color: #6da88a;
+    background: #112b1e;
+    border-color: #1a3d28;
+}
+
+/* Full Auto - Violet */
+QPushButton#autoBtn {
+    color: #ede9fe;
+    background: #3b1f6e;
+    border: 1px solid #5b3a9e;
+}
+QPushButton#autoBtn:hover {
+    background: #4c2d8a;
+    border-color: #7c5cbf;
+}
+QPushButton#autoBtn:disabled {
+    color: #9b8ec4;
+    background: #2a1750;
+    border-color: #3a2568;
+}
+
+/* Manual Stage 2 - Slate (keep neutral) */
+QPushButton#manualStage2Btn {
+    color: #e2e8f0;
+    background: #2d3748;
+    border: 1px solid #4a5568;
+}
+QPushButton#manualStage2Btn:hover {
+    background: #3a4a5e;
+    border-color: #5a6b82;
+}
+QPushButton#manualStage2Btn:disabled {
+    color: #8a9bb2;
+    background: #232d3a;
+    border-color: #3a424d;
+}
+
+/* Running button animation is handled in Python code for smooth breathing */
 
 
 QGroupBox#configGroup {
@@ -305,6 +361,60 @@ QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox {
     color: #f1f6fd;
 }
 
+QComboBox#configInput {
+    background: #141922;
+    color: #f8fbff;
+    border: 1px solid #5a6678;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 14px;
+    font-weight: 600;
+    selection-background-color: #4f8cff;
+    selection-color: #ffffff;
+}
+
+QComboBox#configInput:hover {
+    border-color: #7b8da6;
+}
+
+QComboBox#configInput:focus {
+    border: 1px solid #4f8cff;
+    background: #111824;
+}
+
+QComboBox#configInput::drop-down {
+    border: none;
+    width: 30px;
+}
+
+QComboBox#configInput::down-arrow {
+    image: none;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid #8ea0b8;
+    margin-right: 10px;
+}
+
+QComboBox#configInput QAbstractItemView {
+    background: #1d222b;
+    color: #f3f8ff;
+    border: 1px solid #4a5462;
+    border-radius: 4px;
+    padding: 4px;
+    selection-background-color: #4f8cff;
+    selection-color: #ffffff;
+    outline: none;
+}
+
+QComboBox#configInput QAbstractItemView::item {
+    min-height: 32px;
+    padding: 6px 10px;
+}
+
+QComboBox#configInput QAbstractItemView::item:hover {
+    background: #343c48;
+}
+
 
 QGroupBox#logGroup {
     color: #eef4fd;
@@ -384,4 +494,126 @@ QMessageBox QPushButton:hover {
 QMessageBox QPushButton:pressed {
     background: #3f7aeb;
     border-color: #3f7aeb;
+}
+
+QInputDialog {
+    background: #1d222b;
+}
+
+QInputDialog QLabel {
+    color: #f3f8ff;
+    font-size: 15px;
+    font-weight: 600;
+    min-width: 300px;
+    padding: 4px 0;
+}
+
+QInputDialog QLineEdit {
+    background: #141922;
+    color: #f8fbff;
+    border: 1px solid #5a6678;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 15px;
+    font-weight: 600;
+    min-height: 20px;
+    selection-background-color: #4f8cff;
+    selection-color: #ffffff;
+}
+
+QInputDialog QLineEdit:focus {
+    border: 1px solid #4f8cff;
+    background: #111824;
+}
+
+QInputDialog QPushButton {
+    color: #ffffff;
+    background: #4f8cff;
+    border: 1px solid #4f8cff;
+    border-radius: 8px;
+    font-weight: 700;
+    min-width: 88px;
+    min-height: 34px;
+    padding: 6px 14px;
+}
+
+QInputDialog QPushButton:hover {
+    background: #5c97ff;
+    border-color: #5c97ff;
+}
+
+QInputDialog QPushButton:pressed {
+    background: #3f7aeb;
+    border-color: #3f7aeb;
+}
+
+/* ========== Gallery Dialog ========== */
+
+QDialog#galleryDialog {
+    background: #1f232a;
+    color: #e8eef6;
+}
+
+QDialog#imagePreviewDialog {
+    background: #111720;
+}
+
+QFrame#galleryCell {
+    background: #1b2026;
+    border: 1px solid #343b44;
+    border-radius: 8px;
+}
+
+QFrame#galleryCell:hover {
+    border-color: #4f8cff;
+    background: #222934;
+}
+
+QCheckBox#galleryCheckbox {
+    spacing: 6px;
+    color: #dde6f1;
+}
+
+QCheckBox#galleryCheckbox::indicator {
+    width: 18px;
+    height: 18px;
+    border: 2px solid #5a6678;
+    border-radius: 4px;
+    background: #141922;
+}
+
+QCheckBox#galleryCheckbox::indicator:checked {
+    background: #4f8cff;
+    border-color: #4f8cff;
+}
+
+QFrame#reprocessFrame {
+    background: #1b2026;
+    border: 1px solid #343b44;
+    border-radius: 8px;
+}
+
+QPushButton#reprocessBtn {
+    color: #ffffff;
+    background: #d97706;
+    border: 1px solid #d97706;
+    border-radius: 8px;
+    font-weight: 700;
+    padding: 8px 16px;
+}
+
+QPushButton#reprocessBtn:hover {
+    background: #e68a0a;
+    border-color: #e68a0a;
+}
+
+QPushButton#reprocessBtn:pressed {
+    background: #b45309;
+    border-color: #b45309;
+}
+
+QPushButton#reprocessBtn:disabled {
+    background: #78350f;
+    border-color: #78350f;
+    color: #a8a29e;
 }

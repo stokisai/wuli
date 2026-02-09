@@ -129,6 +129,42 @@ class ComfyUIClient:
             logger.error(f"图片上传异常: {e}")
             return None
     
+    def _is_api_format(self, workflow: dict) -> bool:
+        """检测工作流是否已经是API格式（而非Web/原始格式）"""
+        if "nodes" in workflow and isinstance(workflow["nodes"], list):
+            return False
+        for key, value in workflow.items():
+            if isinstance(value, dict) and "class_type" in value:
+                return True
+        return False
+
+    def _prepare_api_format_workflow(self, workflow: dict, source_image_name: str, prompt_text: str = None) -> dict:
+        """处理已经是API格式的工作流，设置源图片和提示词"""
+        api_workflow = json.loads(json.dumps(workflow))
+
+        for node_id, node in api_workflow.items():
+            class_type = node.get("class_type", "")
+            inputs = node.get("inputs", {})
+
+            if class_type == "LoadImage":
+                inputs["image"] = source_image_name
+                logger.info(f"设置源图片节点{node_id}(LoadImage): {source_image_name}")
+            elif class_type == "LoadImageOutput":
+                inputs["image"] = f"{source_image_name} [input]"
+                logger.info(f"设置源图片节点{node_id}(LoadImageOutput): {source_image_name} [input]")
+
+            if class_type == "DeepTranslatorTextNode" and prompt_text:
+                inputs["text"] = prompt_text
+                logger.info(f"覆盖提示词节点{node_id}: {prompt_text[:50]}...")
+
+            node.pop("_meta", None)
+            for inp_key in list(inputs.keys()):
+                if inp_key == "speak_and_recognation":
+                    del inputs[inp_key]
+
+        logger.info(f"API格式工作流准备完成，包含 {len(api_workflow)} 个节点")
+        return api_workflow
+
     def prepare_workflow(self, source_image_name: str, prompt_text: str = None) -> dict:
         """
         准备工作流配置，设置输入图片
@@ -150,7 +186,12 @@ class ComfyUIClient:
         
         # 深拷贝工作流
         workflow = json.loads(json.dumps(self.workflow_template))
-        
+
+        # 检测是否已经是API格式
+        if self._is_api_format(workflow):
+            logger.info("检测到API格式工作流，跳过转换")
+            return self._prepare_api_format_workflow(workflow, source_image_name, prompt_text)
+
         # 构建链接映射: link_id -> (source_node_id, output_slot)
         links_map = {}
         for link in workflow.get("links", []):
@@ -511,6 +552,9 @@ class ComfyUIClient:
         # 查找输出图片 - 通常在PreviewImage或SaveImage节点
         logger.info(f"工作流输出节点: {list(outputs.keys())}")
         
+        candidates = []
+        type_priority = {"output": 0, "temp": 1, "input": 2}
+
         for node_id, node_output in outputs.items():
             logger.debug(f"节点 {node_id} 输出: {node_output}")
             images = node_output.get("images", [])
@@ -518,16 +562,49 @@ class ComfyUIClient:
                 filename = img_info.get("filename")
                 subfolder = img_info.get("subfolder", "")
                 img_type = img_info.get("type", "output")
-                
+
                 logger.info(f"找到图片: {filename}, 类型: {img_type}, 子目录: {subfolder}")
-                
-                if filename:
-                    success = self.download_image(filename, subfolder, output_path, img_type)
-                    if success:
-                        logger.info(f"图生图处理完成: {output_path}")
-                        return True
-        
-        logger.error("未找到输出图片")
+                if not filename:
+                    continue
+
+                try:
+                    node_order = -int(node_id)
+                except (TypeError, ValueError):
+                    node_order = 0
+
+                candidates.append({
+                    "filename": filename,
+                    "subfolder": subfolder,
+                    "img_type": img_type,
+                    "node_id": str(node_id),
+                    "priority": type_priority.get(img_type, 9),
+                    "node_order": node_order,
+                })
+
+        if not candidates:
+            logger.error("未找到可下载的输出图片")
+            return False
+
+        candidates.sort(key=lambda item: (item["priority"], item["node_order"]))
+
+        for candidate in candidates:
+            logger.info(
+                "尝试下载候选图片: node=%s, type=%s, file=%s",
+                candidate["node_id"],
+                candidate["img_type"],
+                candidate["filename"],
+            )
+            success = self.download_image(
+                candidate["filename"],
+                candidate["subfolder"],
+                output_path,
+                candidate["img_type"],
+            )
+            if success:
+                logger.info(f"图生图处理完成: {output_path}")
+                return True
+
+        logger.error("候选图片下载失败")
         return False
 
 
@@ -561,3 +638,4 @@ if __name__ == "__main__":
         print("ComfyUI连接成功!")
     else:
         print("ComfyUI连接失败，请检查服务是否运行")
+
