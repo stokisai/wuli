@@ -5,11 +5,12 @@
 """
 
 # 版本信息
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
 import os
+import shutil
 import subprocess
 import threading
 from datetime import datetime
@@ -20,7 +21,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QTableWidget, QTableWidgetItem,
     QProgressBar, QTextEdit, QFrame, QSplitter, QMessageBox,
     QHeaderView, QGroupBox, QSizePolicy, QScrollArea, QCheckBox,
-    QStackedWidget, QLineEdit, QFormLayout
+    QStackedWidget, QLineEdit, QFormLayout, QComboBox, QInputDialog
 )
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QObject
 from PySide6.QtGui import QFont, QColor, QPalette, QDesktopServices, QIcon, QBrush, QTextCursor
@@ -50,7 +51,7 @@ class WorkerThread(QThread):
     error_occurred = Signal(str)  # error message
     report_saved = Signal(str)  # report file path
     
-    def __init__(self, mode, task_file, manual_stage2_dir=None, comfyui_url=None, source_path=None, stage1_output_dir=None, parent=None):
+    def __init__(self, mode, task_file, manual_stage2_dir=None, comfyui_url=None, source_path=None, stage1_output_dir=None, workflow_path=None, parent=None):
         super().__init__(parent)
         self.mode = mode  # 'stage1', 'stage2', 'full_auto', 'manual_stage2'
         self.task_file = task_file
@@ -59,6 +60,7 @@ class WorkerThread(QThread):
         self.source_path = source_path  # 全局图片源路径
         self.stage1_results = {}
         self.stage1_output_dir = stage1_output_dir  # Global stage1 output path from config
+        self.workflow_path = workflow_path  # 用户选择的工作流路径
         self.should_stop = False
         self.report_aggregator = {}  # {folder_name: {"Image 1": link, "Image 2": link, ...}}
         self.folder_image_counts = {}  # {folder_name: current_count}
@@ -179,6 +181,9 @@ class WorkerThread(QThread):
         # Initialize ComfyUI client
         try:
             comfyui_client = ComfyUIClient.from_url(global_comfyui_url)
+            if self.workflow_path:
+                comfyui_client.load_workflow(self.workflow_path)
+                self.log(f"✓ 已加载工作流: {os.path.basename(self.workflow_path)}")
             self.log(f"✓ 已连接ComfyUI")
         except Exception as e:
             self.error_occurred.emit(f"无法连接ComfyUI服务器: {e}")
@@ -869,6 +874,52 @@ class MainWindow(QMainWindow):
         
         info_layout.addSpacing(10)
 
+        # ========== 选择工作流 ==========
+        workflow_group = QGroupBox("选择工作流")
+        workflow_group.setObjectName("configGroup")
+        workflow_form = QHBoxLayout(workflow_group)
+        workflow_form.setContentsMargins(12, 12, 12, 12)
+
+        wf_label = QLabel("工作流:")
+        wf_label.setObjectName("configLabel")
+        workflow_form.addWidget(wf_label)
+
+        self.workflow_combo = QComboBox()
+        self.workflow_combo.setObjectName("configInput")
+        self.workflow_combo.setMinimumHeight(36)
+        self._refresh_workflow_combo()
+        # 从 config.ini 恢复上次选择
+        saved_wf = parser.get("ComfyUI", "SelectedWorkflow", fallback="默认工作流")
+        idx = self.workflow_combo.findText(saved_wf)
+        if idx >= 0:
+            self.workflow_combo.setCurrentIndex(idx)
+        workflow_form.addWidget(self.workflow_combo, 1)
+
+        self.upload_workflow_btn = QPushButton("上传")
+        self.upload_workflow_btn.setObjectName("testConfigBtn")
+        self.upload_workflow_btn.setMinimumHeight(36)
+        self.upload_workflow_btn.setMinimumWidth(72)
+        self.upload_workflow_btn.clicked.connect(self._upload_workflow)
+        workflow_form.addWidget(self.upload_workflow_btn)
+
+        self.delete_workflow_btn = QPushButton("删除")
+        self.delete_workflow_btn.setObjectName("testConfigBtn")
+        self.delete_workflow_btn.setMinimumHeight(36)
+        self.delete_workflow_btn.setMinimumWidth(72)
+        self.delete_workflow_btn.clicked.connect(self._delete_workflow)
+        workflow_form.addWidget(self.delete_workflow_btn)
+
+        self.save_workflow_btn = QPushButton("保存")
+        self.save_workflow_btn.setObjectName("saveConfigBtn")
+        self.save_workflow_btn.setMinimumHeight(36)
+        self.save_workflow_btn.setMinimumWidth(72)
+        self.save_workflow_btn.clicked.connect(self._save_workflow_selection)
+        workflow_form.addWidget(self.save_workflow_btn)
+
+        info_layout.addWidget(workflow_group)
+
+        info_layout.addSpacing(10)
+
         # ========== 图片源路径配置 ==========
         source_group = QGroupBox("图片源路径")
         source_group.setObjectName("configGroup")
@@ -1210,6 +1261,7 @@ class MainWindow(QMainWindow):
                 comfyui_url=self.get_comfyui_url(),
                 source_path=self.get_source_path(),
                 stage1_output_dir=self.get_stage1_output_dir(),
+                workflow_path=self.get_selected_workflow_path(),
             )
             self.worker.stage1_results = old_results
             self.worker.stage1_output_dir = old_output_dir
@@ -1221,6 +1273,7 @@ class MainWindow(QMainWindow):
                 comfyui_url=self.get_comfyui_url(),
                 source_path=self.get_source_path(),
                 stage1_output_dir=self.get_stage1_output_dir(),
+                workflow_path=self.get_selected_workflow_path(),
             )
 
         self.worker.progress_updated.connect(self.update_progress)
@@ -1646,6 +1699,99 @@ class MainWindow(QMainWindow):
             parser.write(f)
         QMessageBox.information(self, "Saved", f"Stage1 output path saved: {path}")
 
+    # ---- Workflow Selection Config ----
+
+    def _get_workflows_dir(self) -> Path:
+        """Return the workflows/ directory path, creating it if needed."""
+        wf_dir = Path(__file__).parent / "workflows"
+        wf_dir.mkdir(exist_ok=True)
+        return wf_dir
+
+    def _refresh_workflow_combo(self):
+        """Scan workflows/ directory and repopulate the combo box."""
+        self.workflow_combo.blockSignals(True)
+        current = self.workflow_combo.currentText()
+        self.workflow_combo.clear()
+        wf_dir = self._get_workflows_dir()
+        names = sorted(
+            p.stem for p in wf_dir.glob("*.json")
+        )
+        self.workflow_combo.addItems(names)
+        # restore previous selection if still present
+        idx = self.workflow_combo.findText(current)
+        if idx >= 0:
+            self.workflow_combo.setCurrentIndex(idx)
+        self.workflow_combo.blockSignals(False)
+
+    def get_selected_workflow_path(self) -> str:
+        """Return full path of the currently selected workflow JSON."""
+        name = self.workflow_combo.currentText()
+        if not name:
+            return ""
+        return str(self._get_workflows_dir() / f"{name}.json")
+
+    def _upload_workflow(self):
+        """Let user pick a JSON file, name it, and copy into workflows/."""
+        src, _ = QFileDialog.getOpenFileName(
+            self, "选择工作流文件", "", "JSON文件 (*.json)"
+        )
+        if not src:
+            return
+        name, ok = QInputDialog.getText(
+            self, "命名工作流", "请输入工作流名称:"
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        dest = self._get_workflows_dir() / f"{name}.json"
+        if dest.exists():
+            ret = QMessageBox.question(
+                self, "确认覆盖",
+                f"工作流 \"{name}\" 已存在，是否覆盖？",
+            )
+            if ret != QMessageBox.Yes:
+                return
+        shutil.copy2(src, dest)
+        self._refresh_workflow_combo()
+        idx = self.workflow_combo.findText(name)
+        if idx >= 0:
+            self.workflow_combo.setCurrentIndex(idx)
+        QMessageBox.information(self, "上传成功", f"工作流 \"{name}\" 已添加")
+
+    def _delete_workflow(self):
+        """Delete the currently selected workflow file."""
+        name = self.workflow_combo.currentText()
+        if not name:
+            return
+        ret = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除工作流 \"{name}\" 吗？",
+        )
+        if ret != QMessageBox.Yes:
+            return
+        path = self._get_workflows_dir() / f"{name}.json"
+        if path.exists():
+            path.unlink()
+        self._refresh_workflow_combo()
+        QMessageBox.information(self, "删除成功", f"工作流 \"{name}\" 已删除")
+
+    def _save_workflow_selection(self):
+        """Save the current workflow selection to config.ini."""
+        name = self.workflow_combo.currentText()
+        if not name:
+            QMessageBox.warning(self, "警告", "请先选择一个工作流")
+            return
+        config_path = Path(__file__).parent / "config.ini"
+        parser = configparser.ConfigParser()
+        if config_path.exists():
+            parser.read(config_path, encoding="utf-8")
+        if not parser.has_section("ComfyUI"):
+            parser.add_section("ComfyUI")
+        parser.set("ComfyUI", "SelectedWorkflow", name)
+        with open(config_path, "w", encoding="utf-8") as f:
+            parser.write(f)
+        QMessageBox.information(self, "保存成功", f"已选择工作流: {name}")
+
     def _check_for_updates(self, silent=True):
         """Check updates in background; show dialogs only when silent=False."""
         if self._update_checker and self._update_checker.isRunning():
@@ -1737,6 +1883,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
