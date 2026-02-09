@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-图片处理工具 GUI - v1.1.2
+图片处理工具 GUI - v1.1.3
 为客户提供简单易用的图片处理工具
 """
 
 # 版本信息
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
@@ -356,7 +356,7 @@ class WorkerThread(QThread):
         self._save_report()
         
         self.log(f"阶段2完成: {success_count}/{len(tasks)} 成功")
-        self.stage_completed.emit("stage2", "temp_processed", success_count == len(tasks))
+        self.stage_completed.emit("stage2", os.path.abspath("temp_processed"), success_count == len(tasks))
     
     def run_manual_stage2(self):
         """手动阶段2: 直接从指定目录处理图片"""
@@ -471,7 +471,7 @@ class WorkerThread(QThread):
         
         self._save_report()
         self.log(f"手动阶段2完成: {success_count}/{len(all_tasks)} 成功")
-        self.stage_completed.emit("manual_stage2", "temp_processed", success_count == len(all_tasks))
+        self.stage_completed.emit("manual_stage2", os.path.abspath("temp_processed"), success_count == len(all_tasks))
     
     def _save_report(self):
         """保存报告到Excel - 横向格式"""
@@ -706,7 +706,12 @@ class ImageGalleryDialog(QDialog):
         super().__init__(parent)
         self.setObjectName("galleryDialog")
         self.setWindowTitle("图库 - Stage1 输出结果")
-        self.setModal(True)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+        )
+        self.setModal(False)
         self.resize(1100, 800)
 
         self._image_paths = list(image_paths)
@@ -793,10 +798,16 @@ class ImageGalleryDialog(QDialog):
 
         self._rp_progress = QProgressBar()
         self._rp_progress.setTextVisible(True)
-        self._rp_progress.setFormat("%p%")
+        self._rp_progress.setFormat("%v/%m  %p%")
         self._rp_progress.setVisible(False)
         action_row.addWidget(self._rp_progress, 1)
         rp_layout.addLayout(action_row)
+
+        # 详细进度状态行
+        self._rp_status_label = QLabel("")
+        self._rp_status_label.setStyleSheet("color: #94a3b8; font-size: 12px; padding: 2px 0;")
+        self._rp_status_label.setVisible(False)
+        rp_layout.addWidget(self._rp_status_label)
 
         root.addWidget(reprocess_frame)
 
@@ -917,6 +928,9 @@ class ImageGalleryDialog(QDialog):
         self._rp_progress.setVisible(True)
         self._rp_progress.setValue(0)
         self._rp_progress.setMaximum(len(selected))
+        self._rp_status_label.setVisible(True)
+        self._rp_status_label.setText("准备中...")
+        self.setWindowTitle("图库 - 重处理中...")
 
         self._reprocess_worker = ReprocessWorkerThread(
             selected, self._source_map, self._comfyui_url, wf_path, self
@@ -928,11 +942,15 @@ class ImageGalleryDialog(QDialog):
     def _on_rp_progress(self, current, total, msg):
         self._rp_progress.setMaximum(total)
         self._rp_progress.setValue(current)
+        self._rp_status_label.setText(f"正在处理 ({current}/{total}): {msg}")
+        self.setWindowTitle(f"图库 - 重处理中 {current}/{total}")
 
     def _on_reprocess_complete(self, success):
         self._reprocess_btn.setEnabled(True)
         self._rp_progress.setVisible(False)
+        self._rp_status_label.setVisible(False)
         self._reprocess_worker = None
+        self.setWindowTitle("图库 - Stage1 输出结果")
 
         if success:
             QMessageBox.information(self, "完成", "选中图片已全部重新处理！")
@@ -958,6 +976,20 @@ class ImageGalleryDialog(QDialog):
     def _on_save(self):
         self.accept()
 
+    def closeEvent(self, event):
+        """关闭时检查是否正在重处理"""
+        if self._reprocess_worker and self._reprocess_worker.isRunning():
+            reply = QMessageBox.question(
+                self, "正在处理中",
+                "图片正在重新处理中，关闭窗口将在后台继续。\n\n"
+                "确定要关闭吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
+        event.accept()
 
 class MainWindow(QMainWindow):
     """主窗口"""
@@ -977,10 +1009,13 @@ class MainWindow(QMainWindow):
         self._runtime_log_max_lines = 6000
         self._last_progress_marker = None
         self._stage1_workflow_name = ""
+        self._comfyui_glow_timer = None
+        self._comfyui_glow_step = 0
 
         self.init_ui()
         self._init_runtime_log_capture()
         self._load_existing_log_file()
+        self._load_saved_task_file()
 
         # ?????2???????
         self._update_check_silent = True
@@ -1068,12 +1103,19 @@ class MainWindow(QMainWindow):
         self.file_label = QLabel("\u8bf7\u9009\u62e9 Excel \u4efb\u52a1\u6587\u4ef6...")
         self.file_label.setObjectName("fileLabel")
         self.file_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.file_label.setMaximumWidth(600)
         file_layout.addWidget(self.file_label)
 
         browse_btn = QPushButton("\u6d4f\u89c8...")
         browse_btn.setObjectName("browseBtn")
         browse_btn.clicked.connect(self.browse_file)
         file_layout.addWidget(browse_btn)
+
+        self.save_task_btn = QPushButton("保存")
+        self.save_task_btn.setObjectName("saveConfigBtn")
+        self.save_task_btn.setMinimumHeight(30)
+        self.save_task_btn.clicked.connect(self._save_task_file_path)
+        file_layout.addWidget(self.save_task_btn)
 
         main_layout.addLayout(file_layout)
 
@@ -1403,6 +1445,13 @@ class MainWindow(QMainWindow):
         self.save_stage1_output_btn.clicked.connect(self._save_stage1_output_dir)
         stage1_dir_form.addWidget(self.save_stage1_output_btn)
 
+        self.clear_stage1_btn = QPushButton("清空")
+        self.clear_stage1_btn.setObjectName("clearDangerBtn")
+        self.clear_stage1_btn.setMinimumHeight(36)
+        self.clear_stage1_btn.setMinimumWidth(72)
+        self.clear_stage1_btn.clicked.connect(self._clear_stage1_output_dir)
+        stage1_dir_form.addWidget(self.clear_stage1_btn)
+
         info_layout.addWidget(stage1_dir_group)
         
         info_layout.addSpacing(10)
@@ -1552,6 +1601,17 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.runtime_log_view.append(f"[log-load-error] {e}")
 
+    def _load_saved_task_file(self):
+        """从 config.ini 加载上次保存的任务文件路径"""
+        _, parser = self._read_runtime_config()
+        saved_path = parser.get("Paths", "InputTaskFile", fallback="")
+        if saved_path and os.path.isfile(saved_path):
+            self.task_file = saved_path
+            self.file_label.setText(saved_path)
+            self.stage1_btn.setEnabled(True)
+            self.auto_btn.setEnabled(True)
+            self.manual_stage2_btn.setEnabled(True)
+
     def _append_runtime_log(self, message: str):
         """Append one log line into runtime log panel."""
         if not hasattr(self, "runtime_log_view"):
@@ -1587,7 +1647,7 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "选择任务文件", "", "Excel文件 (*.xlsx *.xls)"
         )
-        
+
         if file_path:
             self.task_file = file_path
             self.file_label.setText(file_path)
@@ -1596,6 +1656,22 @@ class MainWindow(QMainWindow):
             self.manual_stage2_btn.setEnabled(True)
             self.result_table.setRowCount(0)
             self.complete_frame.setVisible(False)
+
+    def _save_task_file_path(self):
+        """保存任务文件路径到 config.ini"""
+        if not self.task_file:
+            QMessageBox.warning(self, "警告", "请先选择任务文件")
+            return
+        config_path = Path(__file__).parent / "config.ini"
+        parser = configparser.ConfigParser()
+        if config_path.exists():
+            parser.read(config_path, encoding="utf-8")
+        if not parser.has_section("Paths"):
+            parser.add_section("Paths")
+        parser.set("Paths", "InputTaskFile", self.task_file)
+        with open(config_path, "w", encoding="utf-8") as f:
+            parser.write(f)
+        QMessageBox.information(self, "保存成功", f"任务文件路径已保存: {self.task_file}")
             
     def run_stage1(self):
         """运行阶段1"""
@@ -1777,8 +1853,10 @@ class MainWindow(QMainWindow):
             self.open_report_folder_btn.setVisible(False)
             self.gallery_btn.setVisible(True)
         elif stage_name in ("stage2", "manual_stage2"):
-            self.complete_label.setText("✅ 全部完成！图片已上传到Google Drive。")
-            self.output_path_label.setText(f"输出目录: {output_dir}")
+            self.complete_label.setText("✅ 全部完成！图片已处理并上传到阿里云 OSS。")
+            self.output_path_label.setText(f"输出目录: {os.path.abspath(output_dir)}")
+            if self.report_file:
+                self.report_label.setText(f"报告文件: {self.report_file}")
             self.complete_frame.setVisible(True)
             # 阶段2显示报告按钮
             self.open_report_btn.setVisible(True)
@@ -1788,7 +1866,7 @@ class MainWindow(QMainWindow):
     def on_report_saved(self, report_path):
         """报告保存完成"""
         self.report_file = report_path
-        self.report_label.setText(f"报告文件: {os.path.basename(report_path)}")
+        self.report_label.setText(f"报告文件: {report_path}")
             
     def on_error(self, error_message):
         """????"""
@@ -1853,7 +1931,15 @@ class MainWindow(QMainWindow):
             btn.style().polish(btn)
     
     def _open_gallery(self):
-        """打开 Stage1 图库预览"""
+        """打开 Stage1 图库预览（如果已有窗口则激活显示）"""
+        # 如果已有图库窗口且未关闭，直接激活显示
+        if hasattr(self, '_gallery_dlg') and self._gallery_dlg is not None:
+            if self._gallery_dlg.isVisible():
+                self._gallery_dlg.showNormal()
+                self._gallery_dlg.activateWindow()
+                self._gallery_dlg.raise_()
+                return
+
         if not self.worker or not self.worker.stage1_results:
             QMessageBox.warning(self, "警告", "没有阶段1的处理结果！")
             return
@@ -1870,7 +1956,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "未找到有效的输出图片！")
             return
 
-        dlg = ImageGalleryDialog(
+        self._gallery_dlg = ImageGalleryDialog(
             image_paths=image_paths,
             source_map=source_map,
             comfyui_url=self.get_comfyui_url(),
@@ -1878,7 +1964,7 @@ class MainWindow(QMainWindow):
             workflows_dir=str(self._get_workflows_dir()),
             parent=self,
         )
-        dlg.exec()
+        self._gallery_dlg.show()
 
     def stop_processing(self):
         """停止处理并提示清理"""
@@ -2037,10 +2123,53 @@ class MainWindow(QMainWindow):
         self.comfyui_status_label.style().polish(self.comfyui_status_label)
         self.comfyui_status_label.update()
 
+    def _start_comfyui_glow(self):
+        """启动 ComfyUI 输入框绿色流动边框动画"""
+        if self._comfyui_glow_timer is None:
+            self._comfyui_glow_timer = QTimer(self)
+            self._comfyui_glow_timer.timeout.connect(self._animate_comfyui_glow)
+        self._comfyui_glow_step = 0
+        self._comfyui_glow_timer.start(40)
+
+    def _stop_comfyui_glow(self):
+        """停止绿色流动边框动画，恢复默认样式"""
+        if self._comfyui_glow_timer:
+            self._comfyui_glow_timer.stop()
+        if hasattr(self, "comfyui_url_input"):
+            self.comfyui_url_input.setStyleSheet("")
+
+    def _animate_comfyui_glow(self):
+        """绿色流动电流动画 — 双正弦波叠加产生流动感"""
+        self._comfyui_glow_step += 1
+        s = self._comfyui_glow_step
+        # 主波: 慢速呼吸 (周期~3s)
+        t1 = math.sin(s * 0.04) * 0.5 + 0.5
+        # 副波: 快速闪烁 (周期~0.8s), 幅度较小
+        t2 = math.sin(s * 0.16) * 0.15
+        t = max(0.0, min(1.0, t1 + t2))
+
+        # 边框颜色: 从暗绿到亮绿
+        br = int(20 + 14 * t)
+        bg = int(120 + 137 * t)  # 120 → 257 clamped to 255
+        bb = int(60 + 68 * t)
+        bg = min(bg, 255)
+        # 背景微微泛绿光
+        bkg_a = int(8 + 12 * t)
+
+        self.comfyui_url_input.setStyleSheet(
+            f"QLineEdit {{ "
+            f"background: rgba(10, {30 + int(20*t)}, 15, 240); "
+            f"color: #a7f3d0; "
+            f"border: 2px solid rgb({br},{bg},{bb}); "
+            f"border-radius: 8px; padding: 8px 10px; "
+            f"font-size: 14px; font-weight: 600; }}"
+        )
+
     def _on_comfyui_url_changed(self, _text: str):
         """URL changed: require re-test before save."""
         self._comfyui_test_ok = False
         self._comfyui_tested_url = ""
+        self._stop_comfyui_glow()
 
         if not hasattr(self, "save_comfyui_btn") or not hasattr(self, "test_comfyui_btn"):
             return
@@ -2096,11 +2225,13 @@ class MainWindow(QMainWindow):
             self._comfyui_tested_url = tested_url
             self.save_comfyui_btn.setEnabled(True)
             self._set_comfyui_status("ok", f"{message}，可点击“保存”写入全局配置。")
+            self._start_comfyui_glow()
         else:
             self._comfyui_test_ok = False
             self._comfyui_tested_url = ""
             self.save_comfyui_btn.setEnabled(False)
             self._set_comfyui_status("error", message)
+            self._stop_comfyui_glow()
 
     def _save_comfyui_url(self):
         """?? ComfyUI ??? config.ini?????????????"""
@@ -2212,6 +2343,44 @@ class MainWindow(QMainWindow):
         with open(config_path, "w", encoding="utf-8") as f:
             parser.write(f)
         QMessageBox.information(self, "Saved", f"Stage1 output path saved: {path}")
+
+    def _clear_stage1_output_dir(self):
+        """清空阶段1输出目录下的所有内容（保留根文件夹）"""
+        path = self.get_stage1_output_dir()
+        if not path:
+            QMessageBox.warning(self, "警告", "请先配置阶段1输出路径")
+            return
+        if not os.path.isdir(path):
+            QMessageBox.warning(self, "警告", f"目录不存在: {path}")
+            return
+
+        # 统计内容
+        items = os.listdir(path)
+        if not items:
+            QMessageBox.information(self, "提示", "目录已经是空的。")
+            return
+
+        reply = QMessageBox.warning(
+            self, "确认清空",
+            f"即将删除以下目录中的所有内容:\n\n"
+            f"📁 {path}\n\n"
+            f"共 {len(items)} 个文件/文件夹，此操作不可撤销！",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            for item in items:
+                item_path = os.path.join(path, item)
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+                else:
+                    os.remove(item_path)
+            QMessageBox.information(self, "完成", f"已清空: {path}")
+        except Exception as e:
+            QMessageBox.warning(self, "清空失败", f"部分内容无法删除: {e}")
 
     # ---- Workflow Selection Config ----
 
@@ -2356,50 +2525,4 @@ class MainWindow(QMainWindow):
                 "3. Release 未上传 .zip 更新包资产。"
             )
             QMessageBox.warning(self, "检查更新失败", f"{error}\n\n{hint}")
-
-    def closeEvent(self, event):
-        """????"""
-        if self._gui_log_handler:
-            root_logger = logging.getLogger('')
-            if self._gui_log_handler in root_logger.handlers:
-                root_logger.removeHandler(self._gui_log_handler)
-            self._gui_log_handler = None
-
-        if self.worker and self.worker.isRunning():
-            reply = QMessageBox.question(
-                self, "\u786e\u8ba4\u9000\u51fa",
-                "\u6b63\u5728\u5904\u7406\u4e2d\uff0c\u786e\u5b9a\u8981\u9000\u51fa\u5417\uff1f",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-
-            if reply == QMessageBox.Yes:
-                self.worker.stop()
-                self.worker.wait(3000)
-                event.accept()
-            else:
-                event.ignore()
-        else:
-            event.accept()
-
-def main():
-    """主函数"""
-    app = QApplication(sys.argv)
-    
-    font = QFont("Microsoft YaHei UI", 10)
-    app.setFont(font)
-    
-    window = MainWindow()
-    window.show()
-    
-    sys.exit(app.exec())
-
-
-if __name__ == "__main__":
-    main()
-
-
-
-
-
 

@@ -617,3 +617,24 @@ QPushButton#reprocessBtn:disabled {
     border-color: #78350f;
     color: #a8a29e;
 }
+
+/* ========== Danger / Clear Button (Red) ========== */
+
+QPushButton#clearDangerBtn {
+    color: #ffffff;
+    background: #b91c1c;
+    border: 1px solid #dc2626;
+    border-radius: 8px;
+    font-weight: 700;
+    padding: 8px 14px;
+}
+
+QPushButton#clearDangerBtn:hover {
+    background: #dc2626;
+    border-color: #ef4444;
+}
+
+QPushButton#clearDangerBtn:pressed {
+    background: #991b1b;
+    border-color: #b91c1c;
+}
