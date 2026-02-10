@@ -6,6 +6,7 @@ import os
 import json
 import time
 import uuid
+import random
 import logging
 import requests
 from pathlib import Path
@@ -81,50 +82,52 @@ class ComfyUIClient:
             logger.error(f"工作流加载失败: {e}")
             return None
     
-    def upload_image(self, image_path: str, subfolder: str = "", overwrite: bool = True) -> str:
+    def upload_image(self, image_path: str, subfolder: str = "", overwrite: bool = True, target_type: str = "input") -> str:
         """
         上传图片到ComfyUI服务器
-        
+
         Args:
             image_path: 本地图片路径
             subfolder: 服务器子文件夹
             overwrite: 是否覆盖同名文件
-            
+            target_type: 上传目标目录 ("input", "output", "temp")
+
         Returns:
             服务器端文件名，失败返回None
         """
         if not os.path.exists(image_path):
             logger.error(f"图片不存在: {image_path}")
             return None
-        
+
         try:
             filename = os.path.basename(image_path)
-            
+
             with open(image_path, 'rb') as f:
                 files = {
                     'image': (filename, f, 'image/png')
                 }
                 data = {
                     'subfolder': subfolder,
-                    'overwrite': str(overwrite).lower()
+                    'overwrite': str(overwrite).lower(),
+                    'type': target_type,
                 }
-                
+
                 response = requests.post(
                     f"{self.base_url}/upload/image",
                     files=files,
                     data=data,
                     timeout=30
                 )
-                
+
                 if response.status_code == 200:
                     result = response.json()
                     server_filename = result.get('name', filename)
-                    logger.info(f"图片上传成功: {filename} -> {server_filename}")
+                    logger.info(f"图片上传成功({target_type}): {filename} -> {server_filename}")
                     return server_filename
                 else:
                     logger.error(f"图片上传失败: {response.status_code} - {response.text}")
                     return None
-                    
+
         except Exception as e:
             logger.error(f"图片上传异常: {e}")
             return None
@@ -150,8 +153,24 @@ class ComfyUIClient:
                 inputs["image"] = source_image_name
                 logger.info(f"设置源图片节点{node_id}(LoadImage): {source_image_name}")
             elif class_type == "LoadImageOutput":
-                inputs["image"] = f"{source_image_name} [input]"
-                logger.info(f"设置源图片节点{node_id}(LoadImageOutput): {source_image_name} [input]")
+                # 将 LoadImageOutput 转换为 LoadImage，从 input 目录加载上传的图片
+                node["class_type"] = "LoadImage"
+                inputs["image"] = source_image_name
+                # 移除 LoadImageOutput 特有的字段
+                for key in ("refresh", "upload_to_output"):
+                    inputs.pop(key, None)
+                logger.info(f"节点{node_id}: LoadImageOutput -> LoadImage, 图片: {source_image_name}")
+
+            # KSampler / KSamplerAdvanced: 每次生成使用随机种子
+            # ComfyUI 网页端 control_after_generate 默认 randomize，但该设置不保存到 API JSON
+            if class_type in ("KSampler", "KSamplerAdvanced") and "seed" in inputs:
+                new_seed = random.randint(0, 2**53 - 1)
+                logger.info(f"节点{node_id}({class_type}): seed {inputs['seed']} -> {new_seed}")
+                inputs["seed"] = new_seed
+            elif class_type == "RandomNoise" and "noise_seed" in inputs:
+                new_seed = random.randint(0, 2**53 - 1)
+                logger.info(f"节点{node_id}(RandomNoise): noise_seed {inputs['noise_seed']} -> {new_seed}")
+                inputs["noise_seed"] = new_seed
 
             if class_type == "DeepTranslatorTextNode" and prompt_text:
                 inputs["text"] = prompt_text
@@ -275,10 +294,14 @@ class ComfyUIClient:
                 api_node["inputs"]["image"] = source_image_name
                 logger.info(f"设置源图片节点8: {source_image_name}")
             
-            # 兼容旧版: LoadImageOutput节点 (node 142)
+            # 兼容旧版: LoadImageOutput节点 (node 142) -> 转换为 LoadImage
             if node_id == "142" and node_type == "LoadImageOutput":
+                api_node["class_type"] = "LoadImage"
                 api_node["inputs"]["image"] = source_image_name
-                logger.info(f"设置源图片节点142: {source_image_name}")
+                # 移除 LoadImageOutput 特有的字段
+                for key in ("refresh", "upload_to_output"):
+                    api_node["inputs"].pop(key, None)
+                logger.info(f"节点142: LoadImageOutput -> LoadImage, 图片: {source_image_name}")
             
             # 4. 特殊处理: DeepTranslatorTextNode节点 (node 20 新版 / node 190 旧版) - 可选覆盖提示词
             if node_type == "DeepTranslatorTextNode" and node_id in ("20", "190"):
@@ -418,12 +441,9 @@ class ComfyUIClient:
                 
                 with open(output_path, 'wb') as f:
                     f.write(response.content)
-                
+
                 logger.info(f"图片下载成功: {filename} -> {output_path}")
-                
-                # 自动裁切白色区域
-                self._auto_crop_white_area(output_path)
-                
+
                 return True
             else:
                 logger.error(f"图片下载失败: {response.status_code}")
@@ -433,63 +453,7 @@ class ComfyUIClient:
             logger.error(f"图片下载异常: {e}")
             return False
     
-    def _auto_crop_white_area(self, image_path: str, white_threshold: int = 250, white_ratio: float = 0.95):
-        """
-        自动裁切图片中的大面积白色区域
-        
-        检测从上往下第一个大面积白色行，裁切保留上半部分
-        
-        Args:
-            image_path: 图片路径
-            white_threshold: 白色像素阈值 (0-255)
-            white_ratio: 一行中白色像素占比阈值
-        """
-        try:
-            import cv2
-            import numpy as np
-            
-            # 读取图片
-            img = cv2.imread(image_path)
-            if img is None:
-                return
-            
-            h, w = img.shape[:2]
-            
-            # 转换为灰度图
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            
-            # 从上往下扫描，找到第一个大面积白色行
-            crop_row = h  # 默认不裁切
-            consecutive_white_rows = 0
-            min_consecutive = 10  # 至少连续10行白色才裁切
-            
-            for row in range(h):
-                # 计算这一行中白色像素的比例
-                white_pixels = np.sum(gray[row, :] >= white_threshold)
-                ratio = white_pixels / w
-                
-                if ratio >= white_ratio:
-                    consecutive_white_rows += 1
-                    if consecutive_white_rows >= min_consecutive:
-                        # 找到白色区域开始位置
-                        crop_row = row - min_consecutive + 1
-                        break
-                else:
-                    consecutive_white_rows = 0
-            
-            # 如果找到白色区域且需要裁切
-            if crop_row < h * 0.9:  # 至少裁切10%才有意义
-                # 裁切图片
-                cropped = img[:crop_row, :]
-                
-                # 保存裁切后的图片
-                cv2.imwrite(image_path, cropped)
-                logger.info(f"自动裁切: {h}x{w} -> {crop_row}x{w} (移除 {h - crop_row} 行白色区域)")
-            
-        except Exception as e:
-            logger.warning(f"自动裁切失败: {e}")
 
-    
     def process_image(self, source_path: str, output_path: str, prompt_text: str = None, max_retries: int = 3) -> bool:
         """
         完整的图生图处理流程，带自动重试
@@ -522,13 +486,13 @@ class ComfyUIClient:
     def _process_image_once(self, source_path: str, output_path: str, prompt_text: str = None) -> bool:
         """单次图生图处理尝试"""
         logger.info(f"开始图生图处理: {source_path}")
-        
+
         # 1. 检查连接
         if not self.check_connection():
             logger.error(f"无法连接到ComfyUI服务器: {self.base_url}")
             return False
-        
-        # 2. 上传图片
+
+        # 2. 上传图片到 input 目录（LoadImageOutput 会在 prepare 阶段被转换为 LoadImage）
         server_filename = self.upload_image(source_path)
         if not server_filename:
             return False
@@ -537,7 +501,18 @@ class ComfyUIClient:
         workflow = self.prepare_workflow(server_filename, prompt_text)
         if not workflow:
             return False
-        
+
+        # 调试: 保存提交的工作流JSON，方便对比网页端
+        debug_dir = os.path.join(os.path.dirname(source_path), "_debug_workflow")
+        os.makedirs(debug_dir, exist_ok=True)
+        debug_file = os.path.join(debug_dir, f"workflow_debug_{os.path.basename(source_path)}.json")
+        try:
+            with open(debug_file, 'w', encoding='utf-8') as f:
+                json.dump(workflow, f, ensure_ascii=False, indent=2)
+            logger.info(f"调试: 工作流已保存到 {debug_file}")
+        except Exception as e:
+            logger.warning(f"调试文件保存失败: {e}")
+
         # 4. 提交执行
         prompt_id = self.queue_prompt(workflow)
         if not prompt_id:
@@ -552,8 +527,24 @@ class ComfyUIClient:
         # 查找输出图片 - 通常在PreviewImage或SaveImage节点
         logger.info(f"工作流输出节点: {list(outputs.keys())}")
         
+        node_class_by_id = {}
+        if isinstance(workflow, dict):
+            for wf_node_id, wf_node in workflow.items():
+                if isinstance(wf_node, dict):
+                    node_class_by_id[str(wf_node_id)] = wf_node.get("class_type", "")
+
         candidates = []
         type_priority = {"output": 0, "temp": 1, "input": 2}
+
+        # 同类型图片时，优先真实处理节点，避免优先取 PreviewImage 包装节点导致结果不稳定
+        def node_rank(node_class: str) -> int:
+            if node_class == "SaveImage":
+                return 0
+            if node_class == "PreviewImage":
+                return 3
+            if node_class:
+                return 1
+            return 2
 
         for node_id, node_output in outputs.items():
             logger.debug(f"节点 {node_id} 输出: {node_output}")
@@ -562,8 +553,9 @@ class ComfyUIClient:
                 filename = img_info.get("filename")
                 subfolder = img_info.get("subfolder", "")
                 img_type = img_info.get("type", "output")
+                n_class = node_class_by_id.get(str(node_id), "")
 
-                logger.info(f"找到图片: {filename}, 类型: {img_type}, 子目录: {subfolder}")
+                logger.info(f"找到图片: {filename}, 类型: {img_type}, 节点: {node_id}/{n_class}, 子目录: {subfolder}")
                 if not filename:
                     continue
 
@@ -577,7 +569,9 @@ class ComfyUIClient:
                     "subfolder": subfolder,
                     "img_type": img_type,
                     "node_id": str(node_id),
+                    "node_class": n_class,
                     "priority": type_priority.get(img_type, 9),
+                    "class_rank": node_rank(n_class),
                     "node_order": node_order,
                 })
 
@@ -585,7 +579,7 @@ class ComfyUIClient:
             logger.error("未找到可下载的输出图片")
             return False
 
-        candidates.sort(key=lambda item: (item["priority"], item["node_order"]))
+        candidates.sort(key=lambda item: (item["priority"], item["class_rank"], item["node_order"]))
 
         for candidate in candidates:
             logger.info(

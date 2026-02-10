@@ -8,9 +8,11 @@ logger = logging.getLogger(__name__)
 def setup_logging(log_file="process.log"):
     logging.basicConfig(
         filename=log_file,
+        filemode='w',
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
-        encoding='utf-8'
+        encoding='utf-8',
+        force=True
     )
     # Also print to console
     console = logging.StreamHandler()

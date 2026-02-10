@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-图片处理工具 GUI - v1.1.3
+图片处理工具 GUI - v1.1.4
 为客户提供简单易用的图片处理工具
 """
 
 # 版本信息
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
@@ -298,7 +298,7 @@ class WorkerThread(QThread):
             
             # 输出路径
             output_filename = f"{task['folder_rel_path']}_{task['img_name']}".replace(os.sep, "_")
-            temp_output_dir = "temp_processed"
+            temp_output_dir = "final_output"
             ensure_dir(temp_output_dir)
             processed_path = os.path.join(temp_output_dir, output_filename)
             
@@ -356,7 +356,7 @@ class WorkerThread(QThread):
         self._save_report()
         
         self.log(f"阶段2完成: {success_count}/{len(tasks)} 成功")
-        self.stage_completed.emit("stage2", os.path.abspath("temp_processed"), success_count == len(tasks))
+        self.stage_completed.emit("stage2", os.path.abspath("final_output"), success_count == len(tasks))
     
     def run_manual_stage2(self):
         """手动阶段2: 直接从指定目录处理图片"""
@@ -424,7 +424,7 @@ class WorkerThread(QThread):
             self.progress_updated.emit(idx, len(all_tasks), f"{task['folder_rel_path']}/{task['img_name']}")
             
             output_filename = f"{task['folder_rel_path']}_{task['img_name']}".replace(os.sep, "_")
-            temp_output_dir = "temp_processed"
+            temp_output_dir = "final_output"
             ensure_dir(temp_output_dir)
             processed_path = os.path.join(temp_output_dir, output_filename)
             
@@ -471,7 +471,7 @@ class WorkerThread(QThread):
         
         self._save_report()
         self.log(f"手动阶段2完成: {success_count}/{len(all_tasks)} 成功")
-        self.stage_completed.emit("manual_stage2", os.path.abspath("temp_processed"), success_count == len(all_tasks))
+        self.stage_completed.emit("manual_stage2", os.path.abspath("final_output"), success_count == len(all_tasks))
     
     def _save_report(self):
         """保存报告到Excel - 横向格式"""
@@ -1250,7 +1250,16 @@ class MainWindow(QMainWindow):
         self.open_report_btn = QPushButton("\u6253\u5f00\u62a5\u544a Excel")
         self.open_report_btn.setObjectName("openReportBtn")
         self.open_report_btn.clicked.connect(self.open_report)
-        btn_layout.addWidget(self.open_report_btn)
+
+        report_btn_row = QHBoxLayout()
+        report_btn_row.setSpacing(6)
+        report_btn_row.addWidget(self.open_report_btn)
+
+        self.delete_report_btn = QPushButton("\u5220\u9664\u62a5\u544a")
+        self.delete_report_btn.setObjectName("deleteReportBtn")
+        self.delete_report_btn.clicked.connect(self.delete_report)
+        report_btn_row.addWidget(self.delete_report_btn)
+        btn_layout.addLayout(report_btn_row)
 
         self.open_report_folder_btn = QPushButton("\u6253\u5f00\u62a5\u544a\u76ee\u5f55")
         self.open_report_folder_btn.setObjectName("openReportFolderBtn")
@@ -1297,8 +1306,9 @@ class MainWindow(QMainWindow):
         _, parser = self._read_runtime_config()
         saved_host = parser.get("ComfyUI", "Host", fallback="")
         saved_port = parser.get("ComfyUI", "DefaultPort", fallback="")
+        saved_scheme = parser.get("ComfyUI", "Scheme", fallback="")
         if saved_host and saved_port:
-            scheme = "https" if saved_port in ("443",) else "http"
+            scheme = saved_scheme if saved_scheme in ("http", "https") else ("https" if saved_port in ("443",) else "http")
             self.comfyui_url_input.setText(f"{scheme}://{saved_host}:{saved_port}")
         comfyui_form.addWidget(self.comfyui_url_input, 1)
 
@@ -1726,11 +1736,41 @@ class MainWindow(QMainWindow):
                 return
             self.result_table.setRowCount(0)
             self.start_worker('manual_stage2', folder_path)
-        
+
+    def _cleanup_old_worker(self):
+        """安全清理旧的工作线程，防止 QThread 被销毁时仍在运行导致崩溃。"""
+        if self.worker is None:
+            return
+        if self.worker.isRunning():
+            self.worker.stop()
+            if not self.worker.wait(5000):
+                logger.warning("旧工作线程 5s 内未结束，强制终止")
+                self.worker.terminate()
+                self.worker.wait(2000)
+        try:
+            self.worker.progress_updated.disconnect()
+            self.worker.log_message.disconnect()
+            self.worker.result_added.disconnect()
+            self.worker.stage_completed.disconnect()
+            self.worker.error_occurred.disconnect()
+            self.worker.report_saved.disconnect()
+            self.worker.finished.disconnect()
+        except RuntimeError:
+            pass
+        self.worker.deleteLater()
+        self.worker = None
+
     def start_worker(self, mode, manual_dir=None):
         """??????"""
         logger.info(f"Start worker: mode={mode}, manual_dir={manual_dir}")
         self._stage1_workflow_name = self.workflow_combo.currentText()
+        old_results = None
+        old_output_dir = None
+        if mode == 'stage2' and self.worker and hasattr(self.worker, 'stage1_results') and self.worker.stage1_results:
+            old_results = self.worker.stage1_results
+            old_output_dir = self.worker.stage1_output_dir
+
+        self._cleanup_old_worker()
         self.set_buttons_enabled(False)
         self.complete_frame.setVisible(False)
         self.progress_bar.setValue(0)
@@ -1750,30 +1790,18 @@ class MainWindow(QMainWindow):
         }
         self._set_running_btn(mode_btn_map.get(mode))
 
-        # ???stage2???????????
-        if mode == 'stage2' and self.worker and self.worker.stage1_results:
-            old_results = self.worker.stage1_results
-            old_output_dir = self.worker.stage1_output_dir
-            self.worker = WorkerThread(
-                mode,
-                self.task_file,
-                comfyui_url=self.get_comfyui_url(),
-                source_path=self.get_source_path(),
-                stage1_output_dir=self.get_stage1_output_dir(),
-                workflow_path=self.get_selected_workflow_path(),
-            )
+        self.worker = WorkerThread(
+            mode,
+            self.task_file,
+            manual_dir,
+            comfyui_url=self.get_comfyui_url(),
+            source_path=self.get_source_path(),
+            stage1_output_dir=self.get_stage1_output_dir(),
+            workflow_path=self.get_selected_workflow_path(),
+        )
+        if old_results:
             self.worker.stage1_results = old_results
             self.worker.stage1_output_dir = old_output_dir
-        else:
-            self.worker = WorkerThread(
-                mode,
-                self.task_file,
-                manual_dir,
-                comfyui_url=self.get_comfyui_url(),
-                source_path=self.get_source_path(),
-                stage1_output_dir=self.get_stage1_output_dir(),
-                workflow_path=self.get_selected_workflow_path(),
-            )
 
         self.worker.progress_updated.connect(self.update_progress)
         self.worker.log_message.connect(self.append_log)
@@ -1850,6 +1878,7 @@ class MainWindow(QMainWindow):
             self.stage2_btn.setEnabled(True)
             # 阶段1不显示报告按钮
             self.open_report_btn.setVisible(False)
+            self.delete_report_btn.setVisible(False)
             self.open_report_folder_btn.setVisible(False)
             self.gallery_btn.setVisible(True)
         elif stage_name in ("stage2", "manual_stage2"):
@@ -1860,6 +1889,7 @@ class MainWindow(QMainWindow):
             self.complete_frame.setVisible(True)
             # 阶段2显示报告按钮
             self.open_report_btn.setVisible(True)
+            self.delete_report_btn.setVisible(True)
             self.open_report_folder_btn.setVisible(True)
             self.gallery_btn.setVisible(False)
     
@@ -1970,11 +2000,13 @@ class MainWindow(QMainWindow):
         """停止处理并提示清理"""
         if not self.worker or not self.worker.isRunning():
             return
-        
-        # 停止工作线程
-        self.worker.stop()
-        self.worker.wait(2000)
-        
+
+        output_dir = self.current_output_dir
+        if not output_dir and self.worker and hasattr(self.worker, 'stage1_output_dir'):
+            output_dir = self.worker.stage1_output_dir
+
+        self._cleanup_old_worker()
+
         # 隐藏指示器
         self.running_indicator.setVisible(False)
         self.stop_btn.setVisible(False)
@@ -1983,11 +2015,8 @@ class MainWindow(QMainWindow):
         self.status_label.setText("已停止")
         self.progress_bar.setValue(0)  # 重置进度条
         self.set_buttons_enabled(True)
-        
-        # 获取当前输出目录（优先从worker获取实际路径）
-        output_dir = self.current_output_dir
-        if not output_dir and self.worker and hasattr(self.worker, 'stage1_output_dir'):
-            output_dir = self.worker.stage1_output_dir
+
+        # 获取当前输出目录
         if not output_dir:
             output_dir = self.get_stage1_output_dir() or self.get_source_path()
         if not output_dir:
@@ -2033,6 +2062,7 @@ class MainWindow(QMainWindow):
             self.report_label.setText("")
             self.complete_frame.setVisible(True)
             self.open_report_btn.setVisible(False)
+            self.delete_report_btn.setVisible(False)
             self.open_report_folder_btn.setVisible(False)
             self.gallery_btn.setVisible(False)
 
@@ -2051,6 +2081,25 @@ class MainWindow(QMainWindow):
             os.startfile(self.report_file)
         else:
             QMessageBox.warning(self, "警告", "报告文件不存在")
+
+    def delete_report(self):
+        """删除报告Excel"""
+        if not self.report_file or not os.path.exists(self.report_file):
+            QMessageBox.warning(self, "警告", "报告文件不存在")
+            return
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除报告文件吗？\n{self.report_file}",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                os.remove(self.report_file)
+                self.report_label.setText("报告文件已删除")
+                self.open_report_btn.setVisible(False)
+                self.delete_report_btn.setVisible(False)
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"删除失败: {e}")
     
     def open_report_folder(self):
         """打开报告所在文件夹"""
@@ -2262,11 +2311,12 @@ class MainWindow(QMainWindow):
             parser.add_section("ComfyUI")
         parser.set("ComfyUI", "Host", host)
         parser.set("ComfyUI", "DefaultPort", port)
+        parser.set("ComfyUI", "Scheme", parsed.scheme)
 
         with open(config_path, "w", encoding="utf-8") as f:
             parser.write(f)
 
-        QMessageBox.information(self, "保存成功", f"ComfyUI 地址已保存: {host}:{port}")
+        QMessageBox.information(self, "保存成功", f"ComfyUI 地址已保存: {parsed.scheme}://{host}:{port}")
         self._set_comfyui_status("ok", f"已保存全局配置: {host}:{port}")
         self.save_comfyui_btn.setEnabled(False)
 
@@ -2525,4 +2575,21 @@ class MainWindow(QMainWindow):
                 "3. Release 未上传 .zip 更新包资产。"
             )
             QMessageBox.warning(self, "检查更新失败", f"{error}\n\n{hint}")
+
+
+def main():
+    """主函数"""
+    app = QApplication(sys.argv)
+
+    font = QFont("Microsoft YaHei UI", 10)
+    app.setFont(font)
+
+    window = MainWindow()
+    window.show()
+
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
 

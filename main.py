@@ -369,7 +369,7 @@ def main():
         # 输出文件名
         output_filename = f"{task['folder_rel_path']}_{task['img_name']}".replace(os.sep, "_")
         
-        temp_output_dir = "temp_processed"
+        temp_output_dir = "final_output"
         ensure_dir(temp_output_dir)
         processed_path = os.path.join(temp_output_dir, output_filename)
         
