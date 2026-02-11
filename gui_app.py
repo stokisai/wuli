@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-图片处理工具 GUI - v1.1.4
+图片处理工具 GUI - v1.1.5
 为客户提供简单易用的图片处理工具
 """
 
 # 版本信息
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
@@ -23,18 +23,21 @@ from PySide6.QtWidgets import (
     QProgressBar, QTextEdit, QFrame, QSplitter, QMessageBox,
     QHeaderView, QGroupBox, QSizePolicy, QScrollArea, QCheckBox,
     QStackedWidget, QLineEdit, QFormLayout, QComboBox, QInputDialog,
-    QDialog, QGridLayout
+    QDialog, QGridLayout, QSpinBox, QRadioButton, QButtonGroup, QDoubleSpinBox
 )
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QObject
-from PySide6.QtGui import QFont, QColor, QPalette, QDesktopServices, QIcon, QBrush, QTextCursor, QPixmap
+from PySide6.QtGui import QFont, QColor, QPalette, QDesktopServices, QIcon, QBrush, QTextCursor, QPixmap, QImage
 
+import cv2
+import numpy as np
+from PIL import Image
 import pandas as pd
 import configparser
 import logging
 import requests
 
 # 导入处理模块
-from image_processor import ImageProcessor
+from image_processor import ImageProcessor, crop_image, resize_image, rotate_image
 from oss_uploader import OSSUploader
 from comfyui_client import ComfyUIClient
 from utils import setup_logging, ensure_dir
@@ -565,7 +568,8 @@ class ComfyUIConnectionTestWorker(QThread):
         try:
             client = ComfyUIClient.from_url(self.url)
             if client.check_connection():
-                self.check_finished.emit(True, self.url, "连接成功，ComfyUI 服务可用")
+                # check_connection 可能回退了 scheme，用 client.base_url 作为实际连通的地址
+                self.check_finished.emit(True, client.base_url, "连接成功，ComfyUI 服务可用")
             else:
                 self.check_finished.emit(False, self.url, "连接失败，请确认地址、端口和 ComfyUI 服务状态")
         except Exception as e:
@@ -698,6 +702,394 @@ class ReprocessWorkerThread(QThread):
         self.should_stop = True
 
 
+class BatchEditWorkerThread(QThread):
+    """批量编辑图片（裁剪/缩放/旋转）"""
+    progress_updated = Signal(int, int, str)  # current, total, message
+    all_done = Signal(bool)
+
+    def __init__(self, image_paths, operation, params, parent=None):
+        super().__init__(parent)
+        self.image_paths = list(image_paths)
+        self.operation = operation  # "crop" | "resize" | "rotate"
+        self.params = dict(params)
+        self.should_stop = False
+
+    def run(self):
+        total = len(self.image_paths)
+        ok_count = 0
+        for idx, path in enumerate(self.image_paths, 1):
+            if self.should_stop:
+                break
+            self.progress_updated.emit(idx, total, os.path.basename(path))
+            try:
+                if self.operation == "crop":
+                    # Trim mode: read image, compute crop region from edges
+                    img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    ih, iw = img.shape[:2]
+                    t, b = self.params["trim_top"], self.params["trim_bottom"]
+                    l, r = self.params["trim_left"], self.params["trim_right"]
+                    x, y = l, t
+                    w = max(1, iw - l - r)
+                    h = max(1, ih - t - b)
+                    crop_image(path, x, y, w, h)
+                elif self.operation == "resize":
+                    if self.params.get("percent"):
+                        img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+                        h, w = img.shape[:2]
+                        pct = self.params["percent"] / 100.0
+                        resize_image(path, max(1, int(w * pct)), max(1, int(h * pct)))
+                    else:
+                        resize_image(path, self.params["width"], self.params["height"])
+                elif self.operation == "rotate":
+                    rotate_image(path, self.params["angle"])
+                ok_count += 1
+            except Exception as e:
+                logger.error(f"BatchEdit failed for {path}: {e}")
+        self.all_done.emit(ok_count == total)
+
+    def stop(self):
+        self.should_stop = True
+
+
+class BatchEditDialog(QDialog):
+    """批量编辑参数对话框"""
+
+    def __init__(self, image_paths, parent=None):
+        super().__init__(parent)
+        self.setObjectName("batchEditDialog")
+        self.setWindowTitle("批量编辑")
+        self.setMinimumWidth(400)
+        self._image_paths = image_paths
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        # Image info
+        info_text = f"选中 {len(self._image_paths)} 张图片"
+        if self._image_paths:
+            try:
+                first = cv2.imdecode(np.fromfile(self._image_paths[0], dtype=np.uint8), cv2.IMREAD_COLOR)
+                if first is not None:
+                    fh, fw = first.shape[:2]
+                    info_text += f"  |  首张尺寸: {fw} x {fh} px"
+            except Exception:
+                pass
+        info_label = QLabel(info_text)
+        info_label.setStyleSheet("color: #8ec5ff; font-size: 13px; padding: 4px 0;")
+        layout.addWidget(info_label)
+
+        # Radio buttons for operation type
+        op_group_layout = QHBoxLayout()
+        self._btn_group = QButtonGroup(self)
+        self._rb_crop = QRadioButton("裁剪")
+        self._rb_resize = QRadioButton("缩放")
+        self._rb_rotate = QRadioButton("旋转")
+        self._rb_resize.setChecked(True)
+        for rb in (self._rb_crop, self._rb_resize, self._rb_rotate):
+            rb.setStyleSheet("color: #dde6f1; font-size: 14px;")
+            self._btn_group.addButton(rb)
+            op_group_layout.addWidget(rb)
+        layout.addLayout(op_group_layout)
+
+        # Stacked panels
+        self._stack = QStackedWidget()
+
+        # -- Crop panel (edge trim mode) --
+        crop_w = QWidget()
+        crop_form = QFormLayout(crop_w)
+        crop_hint = QLabel("从各边裁掉指定像素数")
+        crop_hint.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        crop_form.addRow(crop_hint)
+        self._trim_top = QSpinBox(); self._trim_top.setMaximum(99999); self._trim_top.setSuffix(" px")
+        self._trim_bottom = QSpinBox(); self._trim_bottom.setMaximum(99999); self._trim_bottom.setSuffix(" px")
+        self._trim_left = QSpinBox(); self._trim_left.setMaximum(99999); self._trim_left.setSuffix(" px")
+        self._trim_right = QSpinBox(); self._trim_right.setMaximum(99999); self._trim_right.setSuffix(" px")
+        crop_form.addRow("上边:", self._trim_top)
+        crop_form.addRow("下边:", self._trim_bottom)
+        crop_form.addRow("左边:", self._trim_left)
+        crop_form.addRow("右边:", self._trim_right)
+        self._stack.addWidget(crop_w)
+
+        # -- Resize panel --
+        resize_w = QWidget()
+        resize_form = QFormLayout(resize_w)
+        self._pct_mode = QCheckBox("百分比模式")
+        self._pct_mode.toggled.connect(self._on_pct_toggled)
+        resize_form.addRow(self._pct_mode)
+        self._resize_w = QSpinBox(); self._resize_w.setRange(1, 99999); self._resize_w.setValue(1024)
+        self._resize_h = QSpinBox(); self._resize_h.setRange(1, 99999); self._resize_h.setValue(1024)
+        self._resize_pct = QSpinBox(); self._resize_pct.setRange(1, 1000); self._resize_pct.setValue(100)
+        self._resize_pct.setSuffix("%")
+        self._resize_pct.setVisible(False)
+        self._keep_ratio = QCheckBox("保持比例")
+        resize_form.addRow("宽度:", self._resize_w)
+        resize_form.addRow("高度:", self._resize_h)
+        resize_form.addRow("比例:", self._resize_pct)
+        resize_form.addRow(self._keep_ratio)
+        self._stack.addWidget(resize_w)
+
+        # -- Rotate panel --
+        rotate_w = QWidget()
+        rotate_lay = QVBoxLayout(rotate_w)
+        angle_row = QHBoxLayout()
+        angle_row.addWidget(QLabel("角度:"))
+        self._rotate_angle = QSpinBox()
+        self._rotate_angle.setRange(-360, 360)
+        self._rotate_angle.setValue(90)
+        self._rotate_angle.setSuffix("°")
+        angle_row.addWidget(self._rotate_angle)
+        rotate_lay.addLayout(angle_row)
+        quick_row = QHBoxLayout()
+        for deg in (90, 180, 270):
+            btn = QPushButton(f"{deg}°")
+            btn.clicked.connect(lambda _, d=deg: self._rotate_angle.setValue(d))
+            quick_row.addWidget(btn)
+        rotate_lay.addLayout(quick_row)
+        self._stack.addWidget(rotate_w)
+
+        layout.addWidget(self._stack)
+
+        # Connect radio buttons to stack
+        self._rb_crop.toggled.connect(lambda c: c and self._stack.setCurrentIndex(0))
+        self._rb_resize.toggled.connect(lambda c: c and self._stack.setCurrentIndex(1))
+        self._rb_rotate.toggled.connect(lambda c: c and self._stack.setCurrentIndex(2))
+        self._stack.setCurrentIndex(1)
+
+        # Bottom buttons
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        apply_btn = QPushButton("应用")
+        apply_btn.setObjectName("saveConfigBtn")
+        apply_btn.clicked.connect(self.accept)
+        btn_row.addWidget(apply_btn)
+        layout.addLayout(btn_row)
+
+    def _on_pct_toggled(self, checked):
+        self._resize_pct.setVisible(checked)
+        self._resize_w.setVisible(not checked)
+        self._resize_h.setVisible(not checked)
+        self._keep_ratio.setVisible(not checked)
+
+    def get_params(self):
+        """Return (operation, params_dict)."""
+        if self._rb_crop.isChecked():
+            return "crop", {"trim_top": self._trim_top.value(),
+                            "trim_bottom": self._trim_bottom.value(),
+                            "trim_left": self._trim_left.value(),
+                            "trim_right": self._trim_right.value()}
+        elif self._rb_resize.isChecked():
+            if self._pct_mode.isChecked():
+                return "resize", {"percent": self._resize_pct.value()}
+            return "resize", {"width": self._resize_w.value(), "height": self._resize_h.value()}
+        else:
+            return "rotate", {"angle": self._rotate_angle.value()}
+
+
+class ImageEditorDialog(QDialog):
+    """单图交互编辑器"""
+    image_saved = Signal(str)
+
+    def __init__(self, image_path, parent=None):
+        super().__init__(parent)
+        self.setObjectName("imageEditorDialog")
+        self.setWindowTitle(f"编辑 - {os.path.basename(image_path)}")
+        self.setMinimumSize(800, 600)
+        self._path = image_path
+        self._original = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self._current = self._original.copy()
+        self._build_ui()
+        self._update_preview()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+
+        # Toolbar
+        tb = QHBoxLayout()
+        self._tool_btns = []
+        for name, idx in [("裁剪", 0), ("缩放", 1), ("旋转", 2)]:
+            btn = QPushButton(name)
+            btn.setObjectName("editorToolBtn")
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _, i=idx: self._select_tool(i))
+            tb.addWidget(btn)
+            self._tool_btns.append(btn)
+        tb.addStretch()
+        root.addLayout(tb)
+
+        # Main area: preview + params
+        body = QHBoxLayout()
+
+        # Preview
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self._preview = QLabel()
+        self._preview.setAlignment(Qt.AlignCenter)
+        scroll.setWidget(self._preview)
+        body.addWidget(scroll, 1)
+
+        # Param panels
+        self._param_stack = QStackedWidget()
+        self._param_stack.setFixedWidth(240)
+
+        # Crop params (trim mode)
+        crop_w = QWidget()
+        cl = QFormLayout(crop_w)
+        self._dim_label = QLabel()
+        self._dim_label.setStyleSheet("color: #8ec5ff; font-size: 12px;")
+        cl.addRow(self._dim_label)
+        crop_hint = QLabel("从各边裁掉像素")
+        crop_hint.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        cl.addRow(crop_hint)
+        self._ed_trim_top = QSpinBox(); self._ed_trim_top.setMaximum(99999); self._ed_trim_top.setSuffix(" px")
+        self._ed_trim_bottom = QSpinBox(); self._ed_trim_bottom.setMaximum(99999); self._ed_trim_bottom.setSuffix(" px")
+        self._ed_trim_left = QSpinBox(); self._ed_trim_left.setMaximum(99999); self._ed_trim_left.setSuffix(" px")
+        self._ed_trim_right = QSpinBox(); self._ed_trim_right.setMaximum(99999); self._ed_trim_right.setSuffix(" px")
+        cl.addRow("上边:", self._ed_trim_top)
+        cl.addRow("下边:", self._ed_trim_bottom)
+        cl.addRow("左边:", self._ed_trim_left)
+        cl.addRow("右边:", self._ed_trim_right)
+        crop_apply = QPushButton("应用裁剪")
+        crop_apply.setObjectName("saveConfigBtn")
+        crop_apply.clicked.connect(self._apply_crop)
+        cl.addRow(crop_apply)
+        self._param_stack.addWidget(crop_w)
+
+        # Resize params
+        rsz_w = QWidget()
+        rl = QFormLayout(rsz_w)
+        self._ed_rw = QSpinBox(); self._ed_rw.setRange(1, 99999)
+        self._ed_rh = QSpinBox(); self._ed_rh.setRange(1, 99999)
+        self._ed_keep = QCheckBox("保持比例")
+        self._ed_keep.setChecked(True)
+        self._ed_rw.valueChanged.connect(self._on_resize_w_changed)
+        rl.addRow("宽:", self._ed_rw)
+        rl.addRow("高:", self._ed_rh)
+        rl.addRow(self._ed_keep)
+        rsz_apply = QPushButton("应用缩放")
+        rsz_apply.setObjectName("saveConfigBtn")
+        rsz_apply.clicked.connect(self._apply_resize)
+        rl.addRow(rsz_apply)
+        self._param_stack.addWidget(rsz_w)
+
+        # Rotate params
+        rot_w = QWidget()
+        rtl = QVBoxLayout(rot_w)
+        ar = QHBoxLayout()
+        ar.addWidget(QLabel("角度:"))
+        self._ed_angle = QSpinBox()
+        self._ed_angle.setRange(-360, 360)
+        self._ed_angle.setValue(90)
+        self._ed_angle.setSuffix("°")
+        ar.addWidget(self._ed_angle)
+        rtl.addLayout(ar)
+        for deg in (90, 180, 270):
+            qb = QPushButton(f"{deg}°")
+            qb.clicked.connect(lambda _, d=deg: self._ed_angle.setValue(d))
+            rtl.addWidget(qb)
+        rot_apply = QPushButton("应用旋转")
+        rot_apply.setObjectName("saveConfigBtn")
+        rot_apply.clicked.connect(self._apply_rotate)
+        rtl.addWidget(rot_apply)
+        rtl.addStretch()
+        self._param_stack.addWidget(rot_w)
+
+        body.addWidget(self._param_stack)
+        root.addLayout(body, 1)
+
+        # Bottom bar
+        bottom = QHBoxLayout()
+        reset_btn = QPushButton("重置原图")
+        reset_btn.clicked.connect(self._reset)
+        bottom.addWidget(reset_btn)
+        bottom.addStretch()
+        save_btn = QPushButton("保存关闭")
+        save_btn.setObjectName("saveConfigBtn")
+        save_btn.clicked.connect(self._save_and_close)
+        bottom.addWidget(save_btn)
+        root.addLayout(bottom)
+
+        self._select_tool(0)
+
+    def _select_tool(self, idx):
+        self._param_stack.setCurrentIndex(idx)
+        for i, btn in enumerate(self._tool_btns):
+            btn.setChecked(i == idx)
+            btn.setProperty("active", "true" if i == idx else "false")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        h, w = self._current.shape[:2]
+        self._dim_label.setText(f"当前尺寸: {w} x {h} px")
+        # Update resize spinboxes to current image size
+        if idx == 1:
+            h, w = self._current.shape[:2]
+            self._ed_rw.blockSignals(True)
+            self._ed_rh.blockSignals(True)
+            self._ed_rw.setValue(w)
+            self._ed_rh.setValue(h)
+            self._ed_rw.blockSignals(False)
+            self._ed_rh.blockSignals(False)
+
+    def _update_preview(self):
+        h, w = self._current.shape[:2]
+        rgb = cv2.cvtColor(self._current, cv2.COLOR_BGR2RGB)
+        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+        pix = QPixmap.fromImage(qimg)
+        max_w, max_h = 640, 480
+        if pix.width() > max_w or pix.height() > max_h:
+            pix = pix.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._preview.setPixmap(pix)
+
+    def _on_resize_w_changed(self, val):
+        if self._ed_keep.isChecked():
+            h, w = self._current.shape[:2]
+            if w > 0:
+                self._ed_rh.blockSignals(True)
+                self._ed_rh.setValue(max(1, int(val * h / w)))
+                self._ed_rh.blockSignals(False)
+
+    def _apply_crop(self):
+        ih, iw = self._current.shape[:2]
+        t = self._ed_trim_top.value()
+        b = self._ed_trim_bottom.value()
+        l = self._ed_trim_left.value()
+        r = self._ed_trim_right.value()
+        y1, y2 = t, max(t + 1, ih - b)
+        x1, x2 = l, max(l + 1, iw - r)
+        if x2 > x1 and y2 > y1:
+            self._current = self._current[y1:y2, x1:x2].copy()
+            self._update_preview()
+            self._dim_label.setText(f"当前尺寸: {x2 - x1} x {y2 - y1} px")
+
+    def _apply_resize(self):
+        nw, nh = self._ed_rw.value(), self._ed_rh.value()
+        self._current = cv2.resize(self._current, (nw, nh), interpolation=cv2.INTER_LANCZOS4)
+        self._update_preview()
+
+    def _apply_rotate(self):
+        angle = self._ed_angle.value()
+        pil_img = Image.fromarray(cv2.cvtColor(self._current, cv2.COLOR_BGR2RGB))
+        rotated = pil_img.rotate(-angle, expand=True, resample=Image.BICUBIC)
+        self._current = cv2.cvtColor(np.array(rotated), cv2.COLOR_RGB2BGR)
+        self._update_preview()
+
+    def _reset(self):
+        self._current = self._original.copy()
+        self._update_preview()
+
+    def _save_and_close(self):
+        ext = os.path.splitext(self._path)[1]
+        ok, buf = cv2.imencode(ext, self._current)
+        if ok:
+            buf.tofile(self._path)
+            self.image_saved.emit(self._path)
+        self.accept()
+
+
 class ImageGalleryDialog(QDialog):
     """Stage1 图库预览 + 选图重处理"""
 
@@ -722,6 +1114,7 @@ class ImageGalleryDialog(QDialog):
         self._checkboxes = []
         self._thumb_labels = []
         self._reprocess_worker = None
+        self._batch_edit_worker = None
 
         self._build_ui()
         self._build_gallery_grid()
@@ -757,6 +1150,11 @@ class ImageGalleryDialog(QDialog):
         deselect_all_btn = QPushButton("取消全选")
         deselect_all_btn.clicked.connect(self._deselect_all)
         stats_bar.addWidget(deselect_all_btn)
+
+        batch_edit_btn = QPushButton("批量编辑")
+        batch_edit_btn.setObjectName("batchEditBtn")
+        batch_edit_btn.clicked.connect(self._on_batch_edit)
+        stats_bar.addWidget(batch_edit_btn)
         root.addLayout(stats_bar)
 
         # Scroll area for gallery grid
@@ -873,6 +1271,11 @@ class ImageGalleryDialog(QDialog):
             name_label.setStyleSheet("color: #cbd5e1; font-size: 12px;")
             cell_layout.addWidget(name_label)
 
+            edit_btn = QPushButton("编辑")
+            edit_btn.setObjectName("cellEditBtn")
+            edit_btn.clicked.connect(lambda _, p=path: self._on_edit_image(p))
+            cell_layout.addWidget(edit_btn, 0, Qt.AlignCenter)
+
             self._grid_layout.addWidget(cell, row, col)
 
     def _start_thumbnail_loader(self, paths):
@@ -894,6 +1297,74 @@ class ImageGalleryDialog(QDialog):
     def _on_image_clicked(self, path):
         dlg = ImagePreviewDialog(path, self)
         dlg.exec()
+
+    def _on_edit_image(self, path):
+        dlg = ImageEditorDialog(path, self)
+        dlg.image_saved.connect(self._on_image_edited)
+        dlg.exec()
+
+    def _on_image_edited(self, path):
+        """Refresh the thumbnail for the edited image."""
+        try:
+            idx = self._image_paths.index(path)
+        except ValueError:
+            return
+        loader = ThumbnailLoader([path], size=280, parent=self)
+        loader.thumbnail_ready.connect(
+            lambda _, pix, i=idx: self._thumb_labels[i].setPixmap(pix) if pix and not pix.isNull() else None
+        )
+        loader.start()
+
+    def _on_batch_edit(self):
+        selected = [
+            self._image_paths[i]
+            for i, cb in enumerate(self._checkboxes)
+            if cb.isChecked()
+        ]
+        if not selected:
+            QMessageBox.information(self, "提示", "请先勾选需要编辑的图片")
+            return
+        dlg = BatchEditDialog(selected, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        op, params = dlg.get_params()
+
+        self._reprocess_btn.setEnabled(False)
+        self._rp_progress.setVisible(True)
+        self._rp_progress.setValue(0)
+        self._rp_progress.setMaximum(len(selected))
+        self._rp_status_label.setVisible(True)
+        self._rp_status_label.setText("批量编辑中...")
+        self.setWindowTitle("图库 - 批量编辑中...")
+
+        self._batch_edit_worker = BatchEditWorkerThread(selected, op, params, self)
+        self._batch_edit_worker.progress_updated.connect(self._on_batch_progress)
+        self._batch_edit_worker.all_done.connect(self._on_batch_done)
+        self._batch_edit_worker.start()
+
+    def _on_batch_progress(self, current, total, msg):
+        self._rp_progress.setMaximum(total)
+        self._rp_progress.setValue(current)
+        self._rp_status_label.setText(f"批量编辑 ({current}/{total}): {msg}")
+        self.setWindowTitle(f"图库 - 批量编辑 {current}/{total}")
+
+    def _on_batch_done(self, success):
+        self._reprocess_btn.setEnabled(True)
+        self._rp_progress.setVisible(False)
+        self._rp_status_label.setVisible(False)
+        self._batch_edit_worker = None
+        self.setWindowTitle("图库 - Stage1 输出结果")
+        if success:
+            QMessageBox.information(self, "完成", "批量编辑完成！")
+        else:
+            QMessageBox.warning(self, "提示", "部分图片编辑失败，请检查日志。")
+        # Refresh edited thumbnails
+        edited = [
+            self._image_paths[i]
+            for i, cb in enumerate(self._checkboxes)
+            if cb.isChecked()
+        ]
+        self._refresh_gallery(self._image_paths)
 
     def _on_checkbox_changed(self):
         count = sum(1 for cb in self._checkboxes if cb.isChecked())
@@ -977,8 +1448,12 @@ class ImageGalleryDialog(QDialog):
         self.accept()
 
     def closeEvent(self, event):
-        """关闭时检查是否正在重处理"""
-        if self._reprocess_worker and self._reprocess_worker.isRunning():
+        """关闭时检查是否正在处理"""
+        busy = (
+            (self._reprocess_worker and self._reprocess_worker.isRunning())
+            or (self._batch_edit_worker and self._batch_edit_worker.isRunning())
+        )
+        if busy:
             reply = QMessageBox.question(
                 self, "正在处理中",
                 "图片正在重新处理中，关闭窗口将在后台继续。\n\n"
@@ -2263,19 +2738,27 @@ class MainWindow(QMainWindow):
         self.test_comfyui_btn.setText("测试连接")
         self._comfyui_test_worker = None
 
-        # Ignore stale result when user changed URL during test
-        if tested_url != current_url:
-            self.save_comfyui_btn.setEnabled(False)
-            self._set_comfyui_status("pending", "地址已修改，请重新测试连接。")
-            return
-
         if ok:
+            # 连接成功 — tested_url 可能因 HTTPS→HTTP 回退而与输入不同
+            if tested_url != current_url:
+                # scheme 回退，自动更新输入框为实际连通的地址
+                self.comfyui_url_input.blockSignals(True)
+                self.comfyui_url_input.setText(tested_url)
+                self.comfyui_url_input.blockSignals(False)
             self._comfyui_test_ok = True
             self._comfyui_tested_url = tested_url
             self.save_comfyui_btn.setEnabled(True)
-            self._set_comfyui_status("ok", f"{message}，可点击“保存”写入全局配置。")
+            scheme_note = ""
+            if tested_url != current_url:
+                scheme_note = "（已自动切换为 HTTP）"
+            self._set_comfyui_status("ok", f'{message}{scheme_note}，可点击"保存"写入全局配置。')
             self._start_comfyui_glow()
         else:
+            # 连接失败 — 检查是否是过期结果（用户在测试期间改了地址）
+            if tested_url != current_url:
+                self.save_comfyui_btn.setEnabled(False)
+                self._set_comfyui_status("pending", "地址已修改，请重新测试连接。")
+                return
             self._comfyui_test_ok = False
             self._comfyui_tested_url = ""
             self.save_comfyui_btn.setEnabled(False)

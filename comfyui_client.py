@@ -12,6 +12,10 @@ import requests
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
+# 抑制 HTTPS 自签名证书的 InsecureRequestWarning
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,10 +66,25 @@ class ComfyUIClient:
         logger.info(f"ComfyUI客户端初始化: {self.base_url}")
     
     def check_connection(self) -> bool:
-        """检查与ComfyUI服务器的连接"""
+        """检查与ComfyUI服务器的连接，HTTPS失败时自动回退HTTP"""
         try:
-            response = requests.get(f"{self.base_url}/system_stats", timeout=5)
+            response = requests.get(f"{self.base_url}/system_stats", timeout=5, verify=False)
             return response.status_code == 200
+        except requests.exceptions.SSLError:
+            # HTTPS 握手失败，尝试回退到 HTTP
+            if self.scheme == "https":
+                fallback_url = f"http://{self.host}:{self.port}"
+                logger.info(f"HTTPS连接失败，尝试HTTP回退: {fallback_url}")
+                try:
+                    response = requests.get(f"{fallback_url}/system_stats", timeout=5)
+                    if response.status_code == 200:
+                        self.scheme = "http"
+                        self.base_url = fallback_url
+                        logger.info(f"HTTP回退成功，已切换到: {self.base_url}")
+                        return True
+                except Exception as e2:
+                    logger.error(f"HTTP回退也失败: {e2}")
+            return False
         except Exception as e:
             logger.error(f"ComfyUI连接检查失败: {e}")
             return False
@@ -116,7 +135,8 @@ class ComfyUIClient:
                     f"{self.base_url}/upload/image",
                     files=files,
                     data=data,
-                    timeout=30
+                    timeout=30,
+                    verify=False
                 )
 
                 if response.status_code == 200:
@@ -344,7 +364,8 @@ class ComfyUIClient:
             response = requests.post(
                 f"{self.base_url}/prompt",
                 json=payload,
-                timeout=30
+                timeout=30,
+                verify=False
             )
             
             if response.status_code == 200:
@@ -365,7 +386,8 @@ class ComfyUIClient:
         try:
             response = requests.get(
                 f"{self.base_url}/history/{prompt_id}",
-                timeout=10
+                timeout=10,
+                verify=False
             )
             if response.status_code == 200:
                 return response.json()
@@ -432,7 +454,8 @@ class ComfyUIClient:
             response = requests.get(
                 f"{self.base_url}/view",
                 params=params,
-                timeout=60
+                timeout=60,
+                verify=False
             )
             
             if response.status_code == 200:
@@ -501,17 +524,6 @@ class ComfyUIClient:
         workflow = self.prepare_workflow(server_filename, prompt_text)
         if not workflow:
             return False
-
-        # 调试: 保存提交的工作流JSON，方便对比网页端
-        debug_dir = os.path.join(os.path.dirname(source_path), "_debug_workflow")
-        os.makedirs(debug_dir, exist_ok=True)
-        debug_file = os.path.join(debug_dir, f"workflow_debug_{os.path.basename(source_path)}.json")
-        try:
-            with open(debug_file, 'w', encoding='utf-8') as f:
-                json.dump(workflow, f, ensure_ascii=False, indent=2)
-            logger.info(f"调试: 工作流已保存到 {debug_file}")
-        except Exception as e:
-            logger.warning(f"调试文件保存失败: {e}")
 
         # 4. 提交执行
         prompt_id = self.queue_prompt(workflow)

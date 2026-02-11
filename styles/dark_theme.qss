@@ -638,3 +638,95 @@ QPushButton#clearDangerBtn:pressed {
     background: #991b1b;
     border-color: #b91c1c;
 }
+
+/* ========== Image Editor ========== */
+
+QPushButton#batchEditBtn {
+    color: #ffffff;
+    background: #0e7490;
+    border: 1px solid #06b6d4;
+    border-radius: 8px;
+    font-weight: 700;
+    padding: 8px 14px;
+}
+
+QPushButton#batchEditBtn:hover {
+    background: #0891b2;
+    border-color: #22d3ee;
+}
+
+QDialog#imageEditorDialog {
+    background: #1a1f27;
+    color: #e8eef6;
+}
+
+QDialog#imageEditorDialog QLabel,
+QDialog#batchEditDialog QLabel {
+    color: #dde6f1;
+}
+
+QDialog#imageEditorDialog QSpinBox,
+QDialog#batchEditDialog QSpinBox {
+    background: #141922;
+    color: #f8fbff;
+    border: 1px solid #5a6678;
+    border-radius: 6px;
+    padding: 4px 8px;
+    min-height: 24px;
+}
+
+QDialog#imageEditorDialog QCheckBox,
+QDialog#batchEditDialog QCheckBox {
+    color: #dde6f1;
+    spacing: 6px;
+}
+
+QDialog#imageEditorDialog QCheckBox::indicator,
+QDialog#batchEditDialog QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #5a6678;
+    border-radius: 3px;
+    background: #141922;
+}
+
+QDialog#imageEditorDialog QCheckBox::indicator:checked,
+QDialog#batchEditDialog QCheckBox::indicator:checked {
+    background: #4f8cff;
+    border-color: #4f8cff;
+}
+
+QDialog#batchEditDialog {
+    background: #1f232a;
+    color: #e8eef6;
+}
+
+QPushButton#editorToolBtn {
+    color: #cbd5e1;
+    background: #2d3748;
+    border: 1px solid #4a5568;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-weight: 600;
+}
+
+QPushButton#editorToolBtn[active="true"] {
+    color: #ffffff;
+    background: #4f8cff;
+    border-color: #4f8cff;
+}
+
+QPushButton#cellEditBtn {
+    color: #e0f2fe;
+    background: #1e3a5f;
+    border: 1px solid #2d5a8e;
+    border-radius: 6px;
+    padding: 3px 10px;
+    font-size: 12px;
+    min-height: 22px;
+}
+
+QPushButton#cellEditBtn:hover {
+    background: #264a73;
+    border-color: #3b7ac2;
+}

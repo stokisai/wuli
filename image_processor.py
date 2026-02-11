@@ -3,6 +3,7 @@ Image Processor - Simplified Version
 只保留日文标签添加功能，移除所有文字检测和inpainting代码
 """
 import os
+import io
 import cv2
 import re
 import numpy as np
@@ -11,6 +12,58 @@ from PIL import Image, ImageDraw, ImageFont
 import configparser
 
 logger = logging.getLogger(__name__)
+
+
+# ---- Standalone edit helpers (no ComfyUI) ----
+
+def _read_image(path):
+    """Unicode-safe image read via numpy."""
+    arr = np.fromfile(path, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError(f"Cannot decode image: {path}")
+    return img
+
+
+def _write_image(path, img):
+    """Unicode-safe image write via cv2.imencode."""
+    ext = os.path.splitext(path)[1]
+    ok, buf = cv2.imencode(ext, img)
+    if not ok:
+        raise IOError(f"Failed to encode image: {path}")
+    buf.tofile(path)
+
+
+def crop_image(path, x, y, w, h):
+    """Crop image at (x,y) with size (w,h). Clamps to image bounds. Overwrites file."""
+    img = _read_image(path)
+    ih, iw = img.shape[:2]
+    x, y = max(0, x), max(0, y)
+    x2 = min(iw, x + w)
+    y2 = min(ih, y + h)
+    if x2 <= x or y2 <= y:
+        raise ValueError("Crop region is empty after clamping")
+    cropped = img[y:y2, x:x2]
+    _write_image(path, cropped)
+    return True
+
+
+def resize_image(path, width, height):
+    """Resize image to (width, height) using LANCZOS4. Overwrites file."""
+    img = _read_image(path)
+    resized = cv2.resize(img, (width, height), interpolation=cv2.INTER_LANCZOS4)
+    _write_image(path, resized)
+    return True
+
+
+def rotate_image(path, angle):
+    """Rotate image by arbitrary angle (degrees). Expands canvas. Overwrites file."""
+    arr = np.fromfile(path, dtype=np.uint8)
+    pil_img = Image.open(io.BytesIO(arr))
+    rotated = pil_img.rotate(-angle, expand=True, resample=Image.BICUBIC)
+    rotated_cv = cv2.cvtColor(np.array(rotated), cv2.COLOR_RGB2BGR)
+    _write_image(path, rotated_cv)
+    return True
 
 
 class ImageProcessor:
