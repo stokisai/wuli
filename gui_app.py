@@ -5,7 +5,7 @@
 """
 
 # 版本信息
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.2.0"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
@@ -532,6 +532,283 @@ class WorkerThread(QThread):
         process_folder(root_path)
         return folder_images
     
+    def stop(self):
+        self.should_stop = True
+
+
+class TemplateCompositeWorkerThread(QThread):
+    """模板合成工作线程 - 将模板顶部文案条叠加到产品图上"""
+    progress_updated = Signal(int, int, str)
+    log_message = Signal(str)
+    result_added = Signal(str, str, str, str)  # folder, filename, status, output_path
+    stage_completed = Signal(str, str, bool)
+    error_occurred = Signal(str)
+    report_saved = Signal(str)
+
+    def __init__(self, template_paths, product_dir, selected_order, crop_height=420,
+                 output_size=None, output_dir="template_output", banner_position="top", parent=None):
+        super().__init__(parent)
+        self.template_paths = template_paths       # list of template image paths (ordered by user selection)
+        self.product_dir = product_dir
+        self.selected_order = selected_order       # list of indices into template_paths
+        self.crop_height = crop_height
+        self.output_size = output_size             # (w, h) tuple or None
+        self.output_dir = output_dir
+        self.banner_position = banner_position     # "top" or "bottom"
+        self.should_stop = False
+        self.report_aggregator = {}
+        self.folder_image_counts = {}
+
+    def log(self, message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_message.emit(f"[{timestamp}] {message}")
+        logger.info(message)
+
+    def run(self):
+        try:
+            self._run_composite()
+        except Exception as e:
+            self.error_occurred.emit(f"模板合成出错: {str(e)}")
+            logger.exception("Template composite worker error")
+
+    def _detect_banner_height(self, img):
+        """自动检测模板文案区域高度 - 从底部向上扫描，找到非白色内容的边界"""
+        import numpy as np
+        arr = np.array(img.convert("RGB"))
+        h, w, _ = arr.shape
+        # 从底部向上扫描，找到包含非白色像素的行
+        # 模板背景可能是近白色/奶白色，用较宽松的阈值
+        white_threshold = 235  # RGB 每个通道 >= 235 视为白色/背景
+        for y in range(h - 1, -1, -1):
+            row = arr[y]
+            # 计算这一行中非白色像素的比例
+            non_white = ~((row[:, 0] >= white_threshold) &
+                          (row[:, 1] >= white_threshold) &
+                          (row[:, 2] >= white_threshold))
+            non_white_ratio = non_white.sum() / w
+            # 如果超过 2% 的像素不是白色，认为是内容区域
+            if non_white_ratio > 0.02:
+                banner_h = y + 1 + 15  # 15px padding
+                return min(banner_h, h)
+        return h
+
+    def _crop_banner(self, template_path):
+        """裁切模板顶部文案区域 - 自动检测高度"""
+        from PIL import Image as PILImage
+        img = PILImage.open(template_path).convert("RGBA")
+        if self.crop_height > 0:
+            # 手动指定高度
+            crop_h = min(self.crop_height, img.size[1])
+        else:
+            # 自动检测：从底部扫描白色区域
+            crop_h = self._detect_banner_height(img)
+        banner = img.crop((0, 0, img.size[0], crop_h))
+        self.log(f"    文案区域高度: {crop_h}px (模板总高: {img.size[1]}px)")
+        return banner
+
+    def _overlay_banner(self, product_path, banner, output_path):
+        """将文案条叠加到产品图"""
+        from PIL import Image as PILImage
+        product = PILImage.open(product_path).convert("RGBA")
+
+        # 确定画布尺寸（用模板原始尺寸或 output_size）
+        if self.output_size:
+            canvas_w, canvas_h = self.output_size
+        else:
+            # 用产品图尺寸作为画布
+            canvas_w, canvas_h = product.size
+
+        bw, bh = banner.size
+
+        # 等比缩放 banner 宽度匹配画布
+        if bw != canvas_w:
+            new_h = int(bh * canvas_w / bw)
+            banner_resized = banner.resize((canvas_w, new_h), PILImage.LANCZOS)
+        else:
+            banner_resized = banner
+
+        banner_h = banner_resized.size[1]
+
+        if self.banner_position == "top_preserve":
+            # 产品图顶部保留：产品图从文案条下方开始，底部裁切
+            # 等比缩放产品图宽度匹配画布
+            pw, ph = product.size
+            scale = canvas_w / pw
+            new_pw = canvas_w
+            new_ph = int(ph * scale)
+            product_resized = product.resize((new_pw, new_ph), PILImage.LANCZOS)
+
+            # 创建画布，先放产品图（从 banner 高度开始），底部超出部分自动裁切
+            canvas = PILImage.new("RGBA", (canvas_w, canvas_h), (255, 255, 255, 255))
+            canvas.paste(product_resized, (0, banner_h))
+            # 文案条盖在最上面
+            canvas.paste(banner_resized, (0, 0), banner_resized)
+        else:
+            # 产品图底部保留：产品图填满画布，文案条覆盖顶部
+            product_resized = product.resize((canvas_w, canvas_h), PILImage.LANCZOS)
+            canvas = product_resized.copy()
+            canvas.paste(banner_resized, (0, 0), banner_resized)
+
+        # 保存为 RGB (JPG 不支持 alpha)
+        if output_path.lower().endswith(('.jpg', '.jpeg')):
+            canvas = canvas.convert("RGB")
+        canvas.save(output_path)
+        return True
+
+    def _collect_products(self, root_path):
+        """收集产品图片，按子文件夹分组"""
+        folder_images = []
+        valid_exts = ('.jpg', '.jpeg', '.png', '.webp')
+
+        def process_folder(folder_path):
+            images = []
+            subdirs = []
+            try:
+                items = sorted(os.listdir(folder_path))
+            except Exception:
+                return
+            for item in items:
+                full_path = os.path.join(folder_path, item)
+                if os.path.isfile(full_path):
+                    if item.lower().endswith(valid_exts):
+                        if "副本" not in item and "copy" not in item.lower() and "._" not in item and not item.startswith("$"):
+                            images.append(full_path)
+                elif os.path.isdir(full_path):
+                    subdirs.append(full_path)
+            if images:
+                rel_folder = os.path.relpath(folder_path, root_path)
+                if rel_folder == ".":
+                    rel_folder = os.path.basename(root_path)
+                folder_images.append((rel_folder, sorted(images)))
+            for subdir in subdirs:
+                process_folder(subdir)
+
+        process_folder(root_path)
+        return folder_images
+
+    def _run_composite(self):
+        self.log("开始模板合成处理")
+
+        if not self.selected_order:
+            self.error_occurred.emit("请至少选择一个模板")
+            return
+
+        # 预裁切所有选中模板的 banner
+        self.log(f"裁切 {len(self.selected_order)} 个模板的顶部文案区域 (高度={self.crop_height}px)")
+        banners = []
+        for idx in self.selected_order:
+            tpl_path = self.template_paths[idx]
+            try:
+                banner = self._crop_banner(tpl_path)
+                banners.append(banner)
+                self.log(f"  ✓ 模板: {os.path.basename(tpl_path)}")
+            except Exception as e:
+                self.error_occurred.emit(f"裁切模板失败: {os.path.basename(tpl_path)} - {e}")
+                return
+
+        # 收集产品图
+        folder_images = self._collect_products(self.product_dir)
+        if not folder_images:
+            self.error_occurred.emit(f"产品图目录中未找到图片: {self.product_dir}")
+            return
+
+        # 构建任务列表
+        all_tasks = []
+        for folder_rel, images in folder_images:
+            for img_path in images:
+                all_tasks.append({
+                    'source_path': img_path,
+                    'img_name': os.path.basename(img_path),
+                    'folder_rel_path': folder_rel,
+                })
+
+        self.log(f"找到 {len(all_tasks)} 张产品图，开始合成")
+
+        # OSS 上传
+        uploader = OSSUploader()
+        oss_enabled = uploader.authenticate()
+        if oss_enabled:
+            self.log("✓ 阿里云 OSS 认证成功")
+        else:
+            self.log("⚠ 阿里云 OSS 认证失败，将跳过上传")
+
+        output_dir = self.output_dir
+        ensure_dir(output_dir)
+        success_count = 0
+        template_count = len(banners)
+
+        for idx, task in enumerate(all_tasks):
+            if self.should_stop:
+                self.log("用户取消操作")
+                return
+
+            # 循环分配模板
+            banner = banners[idx % template_count]
+            tpl_name = os.path.splitext(os.path.basename(self.template_paths[self.selected_order[idx % template_count]]))[0]
+
+            self.progress_updated.emit(idx + 1, len(all_tasks), f"{task['img_name']} → 模板 {tpl_name}")
+
+            # 保留原始文件夹结构
+            sub_dir = os.path.join(output_dir, task['folder_rel_path'])
+            ensure_dir(sub_dir)
+            output_path = os.path.join(sub_dir, task['img_name'])
+
+            result_link = ""
+            try:
+                success = self._overlay_banner(task['source_path'], banner, output_path)
+                if success:
+                    if oss_enabled:
+                        try:
+                            folder_name = task['folder_rel_path'].replace("\\", "_").replace("/", "_")
+                            oss_folder = uploader.create_folder(folder_name)
+                            if oss_folder:
+                                file_obj = uploader.upload_file(output_path, oss_folder)
+                                if file_obj:
+                                    result_link = uploader.get_direct_link(file_obj['id'])
+                        except Exception as upload_err:
+                            self.log(f"  ⚠ OSS错误: {str(upload_err)}")
+
+                    self.log(f"✓ ({idx+1}/{len(all_tasks)}) {task['img_name']} → 模板 {tpl_name}")
+                    self.result_added.emit(task['folder_rel_path'], task['img_name'], "完成", result_link or output_path)
+                    success_count += 1
+                else:
+                    self.log(f"✗ ({idx+1}/{len(all_tasks)}) {task['img_name']}")
+                    self.result_added.emit(task['folder_rel_path'], task['img_name'], "失败", "")
+            except Exception as e:
+                self.log(f"✗ ({idx+1}/{len(all_tasks)}) {task['img_name']} - {str(e)}")
+                self.result_added.emit(task['folder_rel_path'], task['img_name'], "错误", "")
+
+            # 报告数据
+            folder_key = task['folder_rel_path'].replace("\\", "_").replace("/", "_")
+            if folder_key not in self.report_aggregator:
+                self.report_aggregator[folder_key] = {}
+                self.folder_image_counts[folder_key] = 0
+            self.folder_image_counts[folder_key] += 1
+            img_col = f"Image {self.folder_image_counts[folder_key]}"
+            self.report_aggregator[folder_key][img_col] = result_link or "Upload Failed"
+
+        # 保存报告
+        self._save_report()
+        self.log(f"模板合成完成: {success_count}/{len(all_tasks)} 成功")
+        self.stage_completed.emit("template_composite", os.path.abspath(output_dir), success_count == len(all_tasks))
+
+    def _save_report(self):
+        if not self.report_aggregator:
+            return
+        report_file = os.path.join(self.output_dir, "template_report.xlsx")
+        try:
+            final_rows = []
+            for folder_name, links_dict in self.report_aggregator.items():
+                row_dict = {"Folder Name": folder_name}
+                row_dict.update(links_dict)
+                final_rows.append(row_dict)
+            df = pd.DataFrame(final_rows)
+            df.to_excel(report_file, index=False)
+            self.log(f"✓ 报告已保存: {report_file}")
+            self.report_saved.emit(os.path.abspath(report_file))
+        except Exception as e:
+            self.log(f"⚠ 保存报告失败: {e}")
+
     def stop(self):
         self.should_stop = True
 
@@ -1526,10 +1803,16 @@ class MainWindow(QMainWindow):
         self.nav_tool_btn.clicked.connect(lambda: self.switch_page(0))
         sidebar_layout.addWidget(self.nav_tool_btn)
 
+        self.nav_template_btn = QPushButton("模板合成")
+        self.nav_template_btn.setObjectName("navButton")
+        self.nav_template_btn.setCheckable(True)
+        self.nav_template_btn.clicked.connect(lambda: self.switch_page(1))
+        sidebar_layout.addWidget(self.nav_template_btn)
+
         self.nav_info_btn = QPushButton("\u914d\u7f6e")
         self.nav_info_btn.setObjectName("navButton")
         self.nav_info_btn.setCheckable(True)
-        self.nav_info_btn.clicked.connect(lambda: self.switch_page(1))
+        self.nav_info_btn.clicked.connect(lambda: self.switch_page(2))
         sidebar_layout.addWidget(self.nav_info_btn)
 
         sidebar_layout.addStretch()
@@ -2013,7 +2296,11 @@ class MainWindow(QMainWindow):
 
         info_layout.addStretch()
 
+        # ========== 模板合成页面 ==========
+        template_page = self._build_template_page()
+
         self.page_stack.addWidget(tool_page)
+        self.page_stack.addWidget(template_page)
         self.page_stack.addWidget(info_page)
 
         self.apply_styles()
@@ -2038,11 +2325,476 @@ class MainWindow(QMainWindow):
         """Switch content page from left navigation."""
         self.page_stack.setCurrentIndex(index)
         self.nav_tool_btn.setProperty("active", index == 0)
-        self.nav_info_btn.setProperty("active", index == 1)
-        for btn in (self.nav_tool_btn, self.nav_info_btn):
+        self.nav_template_btn.setProperty("active", index == 1)
+        self.nav_info_btn.setProperty("active", index == 2)
+        for btn in (self.nav_tool_btn, self.nav_info_btn, self.nav_template_btn):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
             btn.update()
+
+    def _build_template_page(self):
+        """构建模板合成页面"""
+        page = QWidget()
+        page.setObjectName("templatePage")
+        page_outer = QVBoxLayout(page)
+        page_outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background-color: #1f232a; } QScrollArea > QWidget > QWidget { background-color: #1f232a; }")
+        scroll_content = QWidget()
+        scroll_content.setObjectName("templateScrollContent")
+        scroll_content.setStyleSheet("#templateScrollContent { background-color: #1f232a; }")
+        layout = QVBoxLayout(scroll_content)
+        layout.setSpacing(10)
+        layout.setContentsMargins(16, 16, 16, 16)
+        scroll.setWidget(scroll_content)
+        page_outer.addWidget(scroll)
+
+        title = QLabel("模板合成")
+        title.setObjectName("pageTitle")
+        title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addWidget(title)
+
+        # ========== 模板文件夹选择 ==========
+        tpl_folder_group = QGroupBox("模板文件夹")
+        tpl_folder_group.setObjectName("configGroup")
+        tpl_folder_layout = QHBoxLayout(tpl_folder_group)
+        tpl_folder_layout.setContentsMargins(12, 12, 12, 12)
+
+        self.tpl_folder_input = QLineEdit()
+        self.tpl_folder_input.setObjectName("configInput")
+        self.tpl_folder_input.setMinimumHeight(36)
+        self.tpl_folder_input.setPlaceholderText("选择模板图片所在文件夹...")
+        # 默认使用内置模板文件夹
+        default_tpl_dir = str(Path(__file__).parent / "templates")
+        if os.path.isdir(default_tpl_dir):
+            self.tpl_folder_input.setText(default_tpl_dir)
+        tpl_folder_layout.addWidget(self.tpl_folder_input, 1)
+
+        browse_tpl_btn = QPushButton("浏览")
+        browse_tpl_btn.setObjectName("testConfigBtn")
+        browse_tpl_btn.setMinimumHeight(36)
+        browse_tpl_btn.setMinimumWidth(72)
+        browse_tpl_btn.clicked.connect(self._browse_template_folder)
+        tpl_folder_layout.addWidget(browse_tpl_btn)
+
+        load_tpl_btn = QPushButton("加载模板")
+        load_tpl_btn.setObjectName("saveConfigBtn")
+        load_tpl_btn.setMinimumHeight(36)
+        load_tpl_btn.setMinimumWidth(90)
+        load_tpl_btn.clicked.connect(self._load_templates)
+        tpl_folder_layout.addWidget(load_tpl_btn)
+
+        layout.addWidget(tpl_folder_group)
+
+        # ========== 模板卡片区 + 已选顺序 ==========
+        tpl_select_layout = QHBoxLayout()
+
+        # 左侧: 模板卡片勾选区
+        tpl_card_group = QGroupBox("可用模板 (勾选并排序)")
+        tpl_card_group.setObjectName("configGroup")
+        tpl_card_inner = QVBoxLayout(tpl_card_group)
+        tpl_card_inner.setContentsMargins(8, 8, 8, 8)
+
+        self.tpl_scroll_area = QScrollArea()
+        self.tpl_scroll_area.setWidgetResizable(True)
+        self.tpl_scroll_area.setMinimumHeight(160)
+        self.tpl_scroll_area.setStyleSheet("QScrollArea { background-color: #1f232a; border: none; }")
+        self.tpl_card_container = QWidget()
+        self.tpl_card_container.setStyleSheet("background-color: #1f232a;")
+        self.tpl_card_grid = QGridLayout(self.tpl_card_container)
+        self.tpl_card_grid.setSpacing(8)
+        self.tpl_scroll_area.setWidget(self.tpl_card_container)
+        tpl_card_inner.addWidget(self.tpl_scroll_area)
+
+        tpl_select_layout.addWidget(tpl_card_group, 3)
+
+        # 右侧: 已选模板顺序
+        order_group = QGroupBox("已选模板顺序")
+        order_group.setObjectName("configGroup")
+        order_layout = QVBoxLayout(order_group)
+        order_layout.setContentsMargins(8, 8, 8, 8)
+
+        self.tpl_order_list = QTableWidget()
+        self.tpl_order_list.setColumnCount(2)
+        self.tpl_order_list.setHorizontalHeaderLabels(["#", "模板名"])
+        self.tpl_order_list.horizontalHeader().setStretchLastSection(True)
+        self.tpl_order_list.setSelectionBehavior(QTableWidget.SelectRows)
+        self.tpl_order_list.setMinimumHeight(120)
+        order_layout.addWidget(self.tpl_order_list)
+
+        order_btn_layout = QHBoxLayout()
+        move_up_btn = QPushButton("▲ 上移")
+        move_up_btn.setObjectName("testConfigBtn")
+        move_up_btn.setMinimumHeight(32)
+        move_up_btn.clicked.connect(self._tpl_move_up)
+        order_btn_layout.addWidget(move_up_btn)
+
+        move_down_btn = QPushButton("▼ 下移")
+        move_down_btn.setObjectName("testConfigBtn")
+        move_down_btn.setMinimumHeight(32)
+        move_down_btn.clicked.connect(self._tpl_move_down)
+        order_btn_layout.addWidget(move_down_btn)
+
+        remove_btn = QPushButton("删除")
+        remove_btn.setObjectName("clearDangerBtn")
+        remove_btn.setMinimumHeight(32)
+        remove_btn.clicked.connect(self._tpl_remove_selected)
+        order_btn_layout.addWidget(remove_btn)
+
+        order_layout.addLayout(order_btn_layout)
+        tpl_select_layout.addWidget(order_group, 2)
+
+        layout.addLayout(tpl_select_layout)
+
+        # ========== 产品图文件夹 ==========
+        product_group = QGroupBox("产品图文件夹")
+        product_group.setObjectName("configGroup")
+        product_layout = QHBoxLayout(product_group)
+        product_layout.setContentsMargins(12, 12, 12, 12)
+
+        self.product_folder_input = QLineEdit()
+        self.product_folder_input.setObjectName("configInput")
+        self.product_folder_input.setMinimumHeight(36)
+        self.product_folder_input.setPlaceholderText("选择产品图所在文件夹...")
+        product_layout.addWidget(self.product_folder_input, 1)
+
+        browse_product_btn = QPushButton("浏览")
+        browse_product_btn.setObjectName("testConfigBtn")
+        browse_product_btn.setMinimumHeight(36)
+        browse_product_btn.setMinimumWidth(72)
+        browse_product_btn.clicked.connect(self._browse_product_folder)
+        product_layout.addWidget(browse_product_btn)
+
+        layout.addWidget(product_group)
+
+        # ========== 文案位置选择 ==========
+        pos_group = QGroupBox("文案条位置")
+        pos_group.setObjectName("configGroup")
+        pos_layout = QHBoxLayout(pos_group)
+        pos_layout.setContentsMargins(12, 12, 12, 12)
+
+        self.tpl_pos_top = QRadioButton("产品图顶部保留 (底部裁切)")
+        self.tpl_pos_top.setChecked(True)
+        self.tpl_pos_top.setStyleSheet("color: #dde6f1;")
+        pos_layout.addWidget(self.tpl_pos_top)
+
+        self.tpl_pos_bottom = QRadioButton("产品图底部保留 (顶部被遮挡)")
+        self.tpl_pos_bottom.setStyleSheet("color: #dde6f1;")
+        pos_layout.addWidget(self.tpl_pos_bottom)
+
+        layout.addWidget(pos_group)
+
+        # ========== 输出文件夹 ==========
+        output_group = QGroupBox("输出文件夹")
+        output_group.setObjectName("configGroup")
+        output_layout = QHBoxLayout(output_group)
+        output_layout.setContentsMargins(12, 12, 12, 12)
+
+        self.tpl_output_input = QLineEdit()
+        self.tpl_output_input.setObjectName("configInput")
+        self.tpl_output_input.setMinimumHeight(36)
+        self.tpl_output_input.setPlaceholderText("选择输出文件夹路径...")
+        self.tpl_output_input.setText(str(Path(__file__).parent / "template_output"))
+        output_layout.addWidget(self.tpl_output_input, 1)
+
+        browse_output_btn = QPushButton("浏览")
+        browse_output_btn.setObjectName("testConfigBtn")
+        browse_output_btn.setMinimumHeight(36)
+        browse_output_btn.setMinimumWidth(72)
+        browse_output_btn.clicked.connect(self._browse_tpl_output_folder)
+        output_layout.addWidget(browse_output_btn)
+
+        layout.addWidget(output_group)
+
+        # ========== 开始合成按钮 ==========
+        start_layout = QHBoxLayout()
+        self.tpl_start_btn = QPushButton("开始合成")
+        self.tpl_start_btn.setObjectName("stage2Btn")
+        self.tpl_start_btn.setMinimumHeight(48)
+        self.tpl_start_btn.clicked.connect(self._start_template_composite)
+        start_layout.addWidget(self.tpl_start_btn)
+        layout.addLayout(start_layout)
+
+        # ========== 进度条 ==========
+        self.tpl_progress_bar = QProgressBar()
+        self.tpl_progress_bar.setObjectName("progressBar")
+        self.tpl_progress_bar.setMinimumHeight(24)
+        self.tpl_progress_bar.setValue(0)
+        layout.addWidget(self.tpl_progress_bar)
+
+        self.tpl_status_label = QLabel("就绪")
+        self.tpl_status_label.setObjectName("statusLabel")
+        layout.addWidget(self.tpl_status_label)
+
+        # ========== 结果表 ==========
+        self.tpl_result_table = QTableWidget()
+        self.tpl_result_table.setObjectName("resultTable")
+        self.tpl_result_table.setColumnCount(4)
+        self.tpl_result_table.setHorizontalHeaderLabels(["文件夹", "文件名", "状态", "输出/链接"])
+        self.tpl_result_table.horizontalHeader().setStretchLastSection(True)
+        self.tpl_result_table.setMinimumHeight(100)
+        layout.addWidget(self.tpl_result_table, 1)
+
+        # ========== 完成操作按钮 ==========
+        self.tpl_done_frame = QFrame()
+        self.tpl_done_frame.setVisible(False)
+        done_layout = QHBoxLayout(self.tpl_done_frame)
+        done_layout.setContentsMargins(0, 4, 0, 4)
+
+        self.tpl_open_folder_btn = QPushButton("打开输出文件夹")
+        self.tpl_open_folder_btn.setObjectName("testConfigBtn")
+        self.tpl_open_folder_btn.setMinimumHeight(38)
+        self.tpl_open_folder_btn.clicked.connect(self._open_tpl_output_folder)
+        done_layout.addWidget(self.tpl_open_folder_btn)
+
+        self.tpl_open_report_btn = QPushButton("打开Excel报告")
+        self.tpl_open_report_btn.setObjectName("saveConfigBtn")
+        self.tpl_open_report_btn.setMinimumHeight(38)
+        self.tpl_open_report_btn.clicked.connect(self._open_tpl_report)
+        done_layout.addWidget(self.tpl_open_report_btn)
+
+        layout.addWidget(self.tpl_done_frame)
+
+        # 提示文字
+        hint = QLabel("已选模板将按顺序循环应用到所有产品图。只选一个模板时，全部产品图使用该模板。")
+        hint.setObjectName("statusLabel")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        # 内部状态
+        self._tpl_paths = []       # 所有模板文件路径
+        self._tpl_names = []       # 模板显示名
+        self._tpl_checkboxes = []  # 勾选框列表
+        self._tpl_selected_order = []  # 已选模板的索引列表
+        self._tpl_worker = None
+
+        # 自动加载默认模板
+        if os.path.isdir(self.tpl_folder_input.text().strip()):
+            QTimer.singleShot(500, self._load_templates)
+
+        return page
+
+    # ---- 模板合成页面处理方法 ----
+
+    def _browse_template_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "选择模板文件夹")
+        if folder:
+            self.tpl_folder_input.setText(folder)
+            self._load_templates()
+
+    def _browse_product_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "选择产品图文件夹")
+        if folder:
+            self.product_folder_input.setText(folder)
+
+    def _browse_tpl_output_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "选择输出文件夹")
+        if folder:
+            self.tpl_output_input.setText(folder)
+
+    def _open_tpl_output_folder(self):
+        output_dir = getattr(self, '_tpl_output_dir', '')
+        if output_dir and os.path.isdir(output_dir):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(output_dir))
+
+    def _open_tpl_report(self):
+        report_path = getattr(self, '_tpl_report_path', None)
+        if report_path and os.path.isfile(report_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(report_path))
+
+    def _load_templates(self):
+        """从文件夹加载模板图片，显示缩略图卡片"""
+        folder = self.tpl_folder_input.text().strip()
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.warning(self, "提示", "请先选择有效的模板文件夹")
+            return
+
+        # 清空现有卡片
+        while self.tpl_card_grid.count():
+            item = self.tpl_card_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        self._tpl_paths = []
+        self._tpl_names = []
+        self._tpl_checkboxes = []
+        self._tpl_selected_order = []
+        self._refresh_order_list()
+
+        valid_exts = ('.jpg', '.jpeg', '.png', '.webp')
+        try:
+            files = sorted([f for f in os.listdir(folder) if f.lower().endswith(valid_exts)])
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"无法读取文件夹: {e}")
+            return
+
+        if not files:
+            QMessageBox.warning(self, "提示", f"文件夹中未找到图片文件: {folder}")
+            return
+
+        col_count = 4
+        for i, fname in enumerate(files):
+            fpath = os.path.join(folder, fname)
+            self._tpl_paths.append(fpath)
+            name = os.path.splitext(fname)[0]
+            self._tpl_names.append(name)
+
+            card = QWidget()
+            card.setStyleSheet("background-color: #2a3040; border-radius: 6px;")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(4, 4, 4, 4)
+            card_layout.setSpacing(4)
+
+            # 缩略图
+            thumb_label = QLabel()
+            thumb_label.setFixedSize(120, 120)
+            thumb_label.setAlignment(Qt.AlignCenter)
+            thumb_label.setStyleSheet("border: 1px solid #444; background: #2a2a2a;")
+            try:
+                pixmap = QPixmap(fpath)
+                if not pixmap.isNull():
+                    thumb_label.setPixmap(pixmap.scaled(116, 116, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            except Exception:
+                thumb_label.setText("?")
+            card_layout.addWidget(thumb_label, alignment=Qt.AlignCenter)
+
+            # 勾选框 + 名称
+            cb = QCheckBox(name)
+            cb.setStyleSheet("color: #dde6f1; font-size: 12px;")
+            idx = i
+            cb.toggled.connect(lambda checked, index=idx: self._on_template_toggled(index, checked))
+            self._tpl_checkboxes.append(cb)
+            card_layout.addWidget(cb, alignment=Qt.AlignCenter)
+
+            row = i // col_count
+            col = i % col_count
+            self.tpl_card_grid.addWidget(card, row, col)
+
+    def _on_template_toggled(self, index, checked):
+        """模板勾选/取消勾选"""
+        if checked:
+            if index not in self._tpl_selected_order:
+                self._tpl_selected_order.append(index)
+        else:
+            if index in self._tpl_selected_order:
+                self._tpl_selected_order.remove(index)
+        self._refresh_order_list()
+
+    def _refresh_order_list(self):
+        """刷新已选模板顺序表"""
+        self.tpl_order_list.setRowCount(len(self._tpl_selected_order))
+        for row, idx in enumerate(self._tpl_selected_order):
+            self.tpl_order_list.setItem(row, 0, QTableWidgetItem(str(row + 1)))
+            self.tpl_order_list.setItem(row, 1, QTableWidgetItem(self._tpl_names[idx]))
+
+    def _tpl_move_up(self):
+        row = self.tpl_order_list.currentRow()
+        if row > 0:
+            self._tpl_selected_order[row], self._tpl_selected_order[row - 1] = \
+                self._tpl_selected_order[row - 1], self._tpl_selected_order[row]
+            self._refresh_order_list()
+            self.tpl_order_list.setCurrentCell(row - 1, 0)
+
+    def _tpl_move_down(self):
+        row = self.tpl_order_list.currentRow()
+        if 0 <= row < len(self._tpl_selected_order) - 1:
+            self._tpl_selected_order[row], self._tpl_selected_order[row + 1] = \
+                self._tpl_selected_order[row + 1], self._tpl_selected_order[row]
+            self._refresh_order_list()
+            self.tpl_order_list.setCurrentCell(row + 1, 0)
+
+    def _tpl_remove_selected(self):
+        row = self.tpl_order_list.currentRow()
+        if 0 <= row < len(self._tpl_selected_order):
+            idx = self._tpl_selected_order.pop(row)
+            # 取消勾选
+            if idx < len(self._tpl_checkboxes):
+                self._tpl_checkboxes[idx].blockSignals(True)
+                self._tpl_checkboxes[idx].setChecked(False)
+                self._tpl_checkboxes[idx].blockSignals(False)
+            self._refresh_order_list()
+
+    def _start_template_composite(self):
+        """开始模板合成"""
+        if not self._tpl_selected_order:
+            QMessageBox.warning(self, "提示", "请至少选择一个模板")
+            return
+
+        product_dir = self.product_folder_input.text().strip()
+        if not product_dir or not os.path.isdir(product_dir):
+            QMessageBox.warning(self, "提示", "请选择有效的产品图文件夹")
+            return
+
+        # 清空结果表
+        self.tpl_result_table.setRowCount(0)
+        self.tpl_progress_bar.setValue(0)
+        self.tpl_status_label.setText("处理中...")
+        self.tpl_start_btn.setEnabled(False)
+
+        output_dir = self.tpl_output_input.text().strip()
+        if not output_dir:
+            output_dir = str(Path(__file__).parent / "template_output")
+        self._tpl_output_dir = output_dir
+        self._tpl_report_path = None
+
+        banner_pos = "bottom_preserve" if self.tpl_pos_bottom.isChecked() else "top_preserve"
+
+        self._tpl_worker = TemplateCompositeWorkerThread(
+            template_paths=self._tpl_paths,
+            product_dir=product_dir,
+            selected_order=list(self._tpl_selected_order),
+            crop_height=0,  # 0 = 自动检测
+            output_dir=output_dir,
+            banner_position=banner_pos,
+        )
+        self._tpl_worker.progress_updated.connect(self._on_tpl_progress)
+        self._tpl_worker.log_message.connect(self._on_tpl_log)
+        self._tpl_worker.result_added.connect(self._on_tpl_result)
+        self._tpl_worker.stage_completed.connect(self._on_tpl_completed)
+        self._tpl_worker.error_occurred.connect(self._on_tpl_error)
+        self._tpl_worker.report_saved.connect(self._on_tpl_report)
+        self._tpl_worker.start()
+
+    def _on_tpl_progress(self, current, total, message):
+        self.tpl_progress_bar.setMaximum(total)
+        self.tpl_progress_bar.setValue(current)
+        self.tpl_status_label.setText(f"({current}/{total}) {message}")
+
+    def _on_tpl_log(self, message):
+        logger.info(message)
+
+    def _on_tpl_result(self, folder, filename, status, output_path):
+        row = self.tpl_result_table.rowCount()
+        self.tpl_result_table.insertRow(row)
+        self.tpl_result_table.setItem(row, 0, QTableWidgetItem(folder))
+        self.tpl_result_table.setItem(row, 1, QTableWidgetItem(filename))
+        status_item = QTableWidgetItem(status)
+        if status == "完成":
+            status_item.setForeground(QBrush(QColor("#4ade80")))
+        else:
+            status_item.setForeground(QBrush(QColor("#f87171")))
+        self.tpl_result_table.setItem(row, 2, status_item)
+        self.tpl_result_table.setItem(row, 3, QTableWidgetItem(output_path))
+        self.tpl_result_table.scrollToBottom()
+
+    def _on_tpl_completed(self, stage, output_dir, success):
+        self.tpl_start_btn.setEnabled(True)
+        self._tpl_output_dir = output_dir
+        self.tpl_done_frame.setVisible(True)
+        status = "全部成功" if success else "部分完成"
+        self.tpl_status_label.setText(f"合成{status}！输出目录: {output_dir}")
+        QMessageBox.information(self, "完成", f"模板合成{status}\n输出目录: {output_dir}")
+
+    def _on_tpl_error(self, message):
+        self.tpl_start_btn.setEnabled(True)
+        self.tpl_status_label.setText(f"错误: {message}")
+        QMessageBox.critical(self, "错误", message)
+
+    def _on_tpl_report(self, report_path):
+        self._tpl_report_path = report_path
+        self.tpl_status_label.setText(f"报告已保存: {report_path}")
 
     def _read_runtime_config(self):
         """Read config.ini for info page display only."""
