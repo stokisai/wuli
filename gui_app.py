@@ -5,7 +5,7 @@
 """
 
 # 版本信息
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
