@@ -30,6 +30,7 @@ pyinstaller --noconfirm ^
     --add-data "workflow_i2i.json;." ^
     --add-data "fonts;fonts" ^
     --add-data "styles;styles" ^
+    --add-data "templates;templates" ^
     --add-data "credentials.json;." ^
     --hidden-import "pandas" ^
     --hidden-import "openpyxl" ^
@@ -69,6 +70,7 @@ copy "workflow_i2i.json" "dist\" >nul
 copy "credentials.json" "dist\" >nul 2>nul
 xcopy "fonts" "dist\fonts\" /E /I /Y >nul
 xcopy "styles" "dist\styles\" /E /I /Y >nul
+xcopy "templates" "dist\templates\" /E /I /Y >nul
 
 echo.
 echo Done.

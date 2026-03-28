@@ -289,7 +289,7 @@ set "TMP_DIR=%TEMP%\_ota_extract"
 
 echo [Update] Waiting process exit: %PID%
 :WAIT_PROC
-tasklist /FI "PID eq %PID%" 2>nul | find /I "%PID%" >nul
+tasklist /FI "PID eq %PID%" 2>nul | %SystemRoot%\\System32\\find.exe /I "%PID%" >nul
 if errorlevel 1 goto EXTRACT
 timeout /t 1 /nobreak >nul
 goto WAIT_PROC
@@ -305,7 +305,7 @@ if errorlevel 1 (
 )
 
 set "SRC_DIR=%TMP_DIR%"
-for /f %%n in ('dir /b /ad "%TMP_DIR%" 2^>nul ^| find /c /v ""') do (
+for /f %%n in ('dir /b /ad "%TMP_DIR%" 2^>nul ^| %SystemRoot%\\System32\\find.exe /c /v ""') do (
   if %%n==1 (
     for /f "tokens=*" %%i in ('dir /b /ad "%TMP_DIR%"') do set "SRC_DIR=%TMP_DIR%\%%i"
   )
