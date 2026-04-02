@@ -5,7 +5,7 @@
 """
 
 # 版本信息
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.2.5"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
@@ -778,11 +778,16 @@ class TemplateCompositeWorkerThread(QThread):
 
             self.progress_updated.emit(idx + 1, len(all_tasks), f"{task['img_name']} → 模板 {tpl_name}")
 
-            # 保留原始文件夹结构，输出统一为 JPG
+            # 保留原始文件夹结构，输出统一为 JPG（重名时追加原扩展名区分）
             sub_dir = os.path.join(output_dir, task['folder_rel_path'])
             ensure_dir(sub_dir)
             img_base = os.path.splitext(task['img_name'])[0]
-            output_path = os.path.join(sub_dir, f"{img_base}.jpg")
+            img_ext = os.path.splitext(task['img_name'])[1].lower()  # e.g. ".png"
+            out_name = f"{img_base}.jpg"
+            out_path_candidate = os.path.join(sub_dir, out_name)
+            if os.path.exists(out_path_candidate) and img_ext != ".jpg" and img_ext != ".jpeg":
+                out_name = f"{img_base}{img_ext}.jpg"  # e.g. "1 (1).png.jpg"
+            output_path = os.path.join(sub_dir, out_name)
 
             result_link = ""
             try:
@@ -2256,48 +2261,66 @@ class MainWindow(QMainWindow):
         info_layout.addSpacing(10)
 
 
-        oss_group = QGroupBox("阿里云 OSS 配置 (只读)")
+        oss_group = QGroupBox("阿里云 OSS 配置")
         oss_group.setObjectName("configGroup")
-        # 使用 QFormLayout 对齐标签和输入框
         oss_form_layout = QFormLayout(oss_group)
         oss_form_layout.setContentsMargins(20, 20, 20, 20)
         oss_form_layout.setSpacing(15)
         oss_form_layout.setLabelAlignment(Qt.AlignRight)
 
         # 读取 OSS 配置
-        oss_endpoint = parser.get("OSS", "Endpoint", fallback="未配置")
-        oss_bucket = parser.get("OSS", "Bucket", fallback="未配置")
-        oss_key_id = parser.get("OSS", "AccessKeyId", fallback="未配置")
-        oss_key_secret = parser.get("OSS", "AccessKeySecret", fallback="未配置")
+        oss_endpoint = parser.get("OSS", "Endpoint", fallback="")
+        oss_bucket = parser.get("OSS", "Bucket", fallback="")
+        oss_key_id = parser.get("OSS", "AccessKeyId", fallback="")
+        oss_key_secret = parser.get("OSS", "AccessKeySecret", fallback="")
+        oss_prefix = parser.get("OSS", "Prefix", fallback="images/")
 
-        def create_readonly_input(text, is_password=False):
+        def create_oss_input(text, placeholder="", is_password=False):
             inp = QLineEdit(text)
             inp.setObjectName("configInput")
-            inp.setReadOnly(True)
             inp.setMinimumHeight(32)
+            if placeholder:
+                inp.setPlaceholderText(placeholder)
             if is_password:
                 inp.setEchoMode(QLineEdit.Password)
-            # 稍微改变背景色以示只读
-            inp.setStyleSheet("QLineEdit { background-color: rgba(30, 41, 59, 0.5); color: #94a3b8; border: 1px solid #334155; }")
             return inp
 
-        self.oss_endpoint_input = create_readonly_input(oss_endpoint)
+        self.oss_endpoint_input = create_oss_input(oss_endpoint, "例: oss-cn-hongkong.aliyuncs.com")
         oss_form_layout.addRow("Endpoint:", self.oss_endpoint_input)
 
-        self.oss_bucket_input = create_readonly_input(oss_bucket)
+        self.oss_bucket_input = create_oss_input(oss_bucket, "例: my-bucket-name")
         oss_form_layout.addRow("Bucket:", self.oss_bucket_input)
 
-        self.oss_key_input = create_readonly_input(oss_key_id)
+        self.oss_key_input = create_oss_input(oss_key_id, "阿里云 AccessKey ID")
         oss_form_layout.addRow("AccessKeyId:", self.oss_key_input)
 
-        self.oss_secret_input = create_readonly_input(oss_key_secret, is_password=True)
+        self.oss_secret_input = create_oss_input(oss_key_secret, "阿里云 AccessKey Secret", is_password=True)
         oss_form_layout.addRow("AccessKeySecret:", self.oss_secret_input)
-        
+
+        self.oss_prefix_input = create_oss_input(oss_prefix, "例: images/")
+        oss_form_layout.addRow("路径前缀:", self.oss_prefix_input)
+
         # 调整标签样式
         for i in range(oss_form_layout.rowCount()):
             item = oss_form_layout.itemAt(i, QFormLayout.LabelRole)
             if item and item.widget():
                 item.widget().setStyleSheet("font-weight: bold; color: #cbd5e1; font-size: 13px;")
+
+        # 保存 & 测试按钮
+        oss_btn_layout = QHBoxLayout()
+        oss_btn_layout.addStretch()
+        self.oss_test_btn = QPushButton("测试连接")
+        self.oss_test_btn.setObjectName("copyLogBtn")
+        self.oss_test_btn.setMinimumHeight(34)
+        self.oss_test_btn.clicked.connect(self._test_oss_connection)
+        oss_btn_layout.addWidget(self.oss_test_btn)
+        self.oss_save_btn = QPushButton("保存 OSS 配置")
+        self.oss_save_btn.setObjectName("copyLogBtn")
+        self.oss_save_btn.setMinimumHeight(34)
+        self.oss_save_btn.clicked.connect(self._save_oss_config)
+        oss_btn_layout.addWidget(self.oss_save_btn)
+        oss_form_layout.addRow("", QWidget())  # spacer row
+        oss_form_layout.addRow(oss_btn_layout)
 
         info_layout.addWidget(oss_group)
 
@@ -2909,6 +2932,39 @@ class MainWindow(QMainWindow):
 
         QApplication.clipboard().setText(text)
         QMessageBox.information(self, "\u590d\u5236\u6210\u529f", "\u65e5\u5fd7\u5df2\u590d\u5236\u5230\u526a\u8d34\u677f\u3002")
+
+    def _save_oss_config(self):
+        """保存 OSS 配置到 config.ini"""
+        config_path = Path(__file__).parent / "config.ini"
+        parser = configparser.ConfigParser()
+        if config_path.exists():
+            parser.read(config_path, encoding="utf-8")
+        if not parser.has_section("OSS"):
+            parser.add_section("OSS")
+        parser.set("OSS", "Endpoint", self.oss_endpoint_input.text().strip())
+        parser.set("OSS", "Bucket", self.oss_bucket_input.text().strip())
+        parser.set("OSS", "AccessKeyId", self.oss_key_input.text().strip())
+        parser.set("OSS", "AccessKeySecret", self.oss_secret_input.text().strip())
+        parser.set("OSS", "Prefix", self.oss_prefix_input.text().strip())
+        with open(config_path, "w", encoding="utf-8") as f:
+            parser.write(f)
+        QMessageBox.information(self, "保存成功", "OSS 配置已保存，下次处理时生效。")
+
+    def _test_oss_connection(self):
+        """测试 OSS 连接"""
+        from oss_uploader import OSSUploader
+        uploader = OSSUploader.__new__(OSSUploader)
+        uploader.endpoint = self.oss_endpoint_input.text().strip()
+        uploader.bucket_name = self.oss_bucket_input.text().strip()
+        uploader.access_key_id = self.oss_key_input.text().strip()
+        uploader.access_key_secret = self.oss_secret_input.text().strip()
+        uploader.prefix = self.oss_prefix_input.text().strip().strip("/")
+        uploader.bucket = None
+        uploader.auth = None
+        if uploader.authenticate():
+            QMessageBox.information(self, "连接成功", f"OSS 连接成功!\nBucket: {uploader.bucket_name}\n链接前缀: https://{uploader.bucket_name}.{uploader.endpoint}/")
+        else:
+            QMessageBox.warning(self, "连接失败", "OSS 连接失败，请检查配置参数是否正确。")
 
     def browse_file(self):
         """浏览并选择任务文件"""
