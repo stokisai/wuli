@@ -5,7 +5,7 @@
 """
 
 # 版本信息
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.4"
 GITHUB_REPO = "stokisai/wuli"
 
 import sys
@@ -593,9 +593,10 @@ class TemplateCompositeWorkerThread(QThread):
         return h
 
     def _crop_banner(self, template_path):
-        """裁切模板顶部文案区域 - 自动检测高度"""
+        """裁切模板顶部文案区域 - 自动检测高度，同时返回模板原始尺寸"""
         from PIL import Image as PILImage
         img = PILImage.open(template_path).convert("RGBA")
+        template_size = img.size  # 保存模板原始尺寸
         if self.crop_height > 0:
             # 手动指定高度
             crop_h = min(self.crop_height, img.size[1])
@@ -604,19 +605,27 @@ class TemplateCompositeWorkerThread(QThread):
             crop_h = self._detect_banner_height(img)
         banner = img.crop((0, 0, img.size[0], crop_h))
         self.log(f"    文案区域高度: {crop_h}px (模板总高: {img.size[1]}px)")
-        return banner
+        return banner, template_size
 
-    def _overlay_banner(self, product_path, banner, output_path):
+    def _overlay_banner(self, product_path, banner, output_path, template_size=None):
         """将文案条叠加到产品图"""
         from PIL import Image as PILImage
         product = PILImage.open(product_path).convert("RGBA")
 
-        # 确定画布尺寸（用模板原始尺寸或 output_size）
+        self.log(f"  [DEBUG] 产品图: {product_path}")
+        self.log(f"  [DEBUG] 产品图尺寸: {product.size}, 模板尺寸: {template_size}, output_size: {self.output_size}")
+        self.log(f"  [DEBUG] banner尺寸: {banner.size}, 模式: {self.banner_position}")
+
+        # 确定画布尺寸：优先 output_size，其次模板原始尺寸，最后产品图尺寸
         if self.output_size:
             canvas_w, canvas_h = self.output_size
+            self.log(f"  [DEBUG] 画布来源: output_size = {canvas_w}x{canvas_h}")
+        elif template_size:
+            canvas_w, canvas_h = template_size
+            self.log(f"  [DEBUG] 画布来源: template_size = {canvas_w}x{canvas_h}")
         else:
-            # 用产品图尺寸作为画布
             canvas_w, canvas_h = product.size
+            self.log(f"  [DEBUG] 画布来源: product.size = {canvas_w}x{canvas_h}")
 
         bw, bh = banner.size
 
@@ -624,10 +633,12 @@ class TemplateCompositeWorkerThread(QThread):
         if bw != canvas_w:
             new_h = int(bh * canvas_w / bw)
             banner_resized = banner.resize((canvas_w, new_h), PILImage.LANCZOS)
+            self.log(f"  [DEBUG] banner缩放: {bw}x{bh} -> {canvas_w}x{new_h}")
         else:
             banner_resized = banner
 
         banner_h = banner_resized.size[1]
+        self.log(f"  [DEBUG] banner最终高度: {banner_h}px")
 
         if self.banner_position == "top_preserve":
             # 产品图顶部保留：产品图从文案条下方开始，底部裁切
@@ -637,6 +648,7 @@ class TemplateCompositeWorkerThread(QThread):
             new_pw = canvas_w
             new_ph = int(ph * scale)
             product_resized = product.resize((new_pw, new_ph), PILImage.LANCZOS)
+            self.log(f"  [DEBUG] top_preserve: 产品图缩放 {pw}x{ph} -> {new_pw}x{new_ph}, 放置在 y={banner_h}")
 
             # 创建画布，先放产品图（从 banner 高度开始），底部超出部分自动裁切
             canvas = PILImage.new("RGBA", (canvas_w, canvas_h), (255, 255, 255, 255))
@@ -644,10 +656,19 @@ class TemplateCompositeWorkerThread(QThread):
             # 文案条盖在最上面
             canvas.paste(banner_resized, (0, 0), banner_resized)
         else:
-            # 产品图底部保留：产品图填满画布，文案条覆盖顶部
-            product_resized = product.resize((canvas_w, canvas_h), PILImage.LANCZOS)
-            canvas = product_resized.copy()
+            # 产品图底部保留：等比缩放宽度匹配画布，文案条覆盖顶部
+            pw, ph = product.size
+            scale = canvas_w / pw
+            new_pw = canvas_w
+            new_ph = int(ph * scale)
+            product_resized = product.resize((new_pw, new_ph), PILImage.LANCZOS)
+            self.log(f"  [DEBUG] bottom_preserve: 产品图缩放 {pw}x{ph} -> {new_pw}x{new_ph}, 放置在 y=0")
+
+            canvas = PILImage.new("RGBA", (canvas_w, canvas_h), (255, 255, 255, 255))
+            canvas.paste(product_resized, (0, 0))
             canvas.paste(banner_resized, (0, 0), banner_resized)
+
+        self.log(f"  [DEBUG] 输出: {output_path}, 画布: {canvas_w}x{canvas_h}")
 
         # 保存为 RGB (JPG 不支持 alpha)
         if output_path.lower().endswith(('.jpg', '.jpeg')):
@@ -673,8 +694,12 @@ class TemplateCompositeWorkerThread(QThread):
                     if item.lower().endswith(valid_exts):
                         if "副本" not in item and "copy" not in item.lower() and "._" not in item and not item.startswith("$"):
                             images.append(full_path)
+                            logger.info(f"[COLLECT] 收录: {item}")
+                        else:
+                            logger.info(f"[COLLECT] 跳过(过滤规则): {item}")
                 elif os.path.isdir(full_path):
                     subdirs.append(full_path)
+            logger.info(f"[COLLECT] 文件夹 {folder_path}: 收录 {len(images)} 张图片")
             if images:
                 rel_folder = os.path.relpath(folder_path, root_path)
                 if rel_folder == ".":
@@ -684,6 +709,7 @@ class TemplateCompositeWorkerThread(QThread):
                 process_folder(subdir)
 
         process_folder(root_path)
+        logger.info(f"[COLLECT] 总计: {sum(len(imgs) for _, imgs in folder_images)} 张图片, {len(folder_images)} 个文件夹")
         return folder_images
 
     def _run_composite(self):
@@ -696,12 +722,14 @@ class TemplateCompositeWorkerThread(QThread):
         # 预裁切所有选中模板的 banner
         self.log(f"裁切 {len(self.selected_order)} 个模板的顶部文案区域 (高度={self.crop_height}px)")
         banners = []
+        template_sizes = []
         for idx in self.selected_order:
             tpl_path = self.template_paths[idx]
             try:
-                banner = self._crop_banner(tpl_path)
+                banner, tpl_size = self._crop_banner(tpl_path)
                 banners.append(banner)
-                self.log(f"  ✓ 模板: {os.path.basename(tpl_path)}")
+                template_sizes.append(tpl_size)
+                self.log(f"  ✓ 模板: {os.path.basename(tpl_path)} ({tpl_size[0]}x{tpl_size[1]})")
             except Exception as e:
                 self.error_occurred.emit(f"裁切模板失败: {os.path.basename(tpl_path)} - {e}")
                 return
@@ -743,19 +771,22 @@ class TemplateCompositeWorkerThread(QThread):
                 return
 
             # 循环分配模板
-            banner = banners[idx % template_count]
-            tpl_name = os.path.splitext(os.path.basename(self.template_paths[self.selected_order[idx % template_count]]))[0]
+            tpl_idx = idx % template_count
+            banner = banners[tpl_idx]
+            tpl_size = template_sizes[tpl_idx]
+            tpl_name = os.path.splitext(os.path.basename(self.template_paths[self.selected_order[tpl_idx]]))[0]
 
             self.progress_updated.emit(idx + 1, len(all_tasks), f"{task['img_name']} → 模板 {tpl_name}")
 
-            # 保留原始文件夹结构
+            # 保留原始文件夹结构，输出统一为 JPG
             sub_dir = os.path.join(output_dir, task['folder_rel_path'])
             ensure_dir(sub_dir)
-            output_path = os.path.join(sub_dir, task['img_name'])
+            img_base = os.path.splitext(task['img_name'])[0]
+            output_path = os.path.join(sub_dir, f"{img_base}.jpg")
 
             result_link = ""
             try:
-                success = self._overlay_banner(task['source_path'], banner, output_path)
+                success = self._overlay_banner(task['source_path'], banner, output_path, template_size=tpl_size)
                 if success:
                     if oss_enabled:
                         try:
@@ -3814,6 +3845,19 @@ class MainWindow(QMainWindow):
 
 def main():
     """主函数"""
+    # 配置文件日志 - 写入 process.log
+    from pathlib import Path as _Path
+    _log_path = _Path(__file__).parent / "process.log"
+    _file_handler = logging.FileHandler(str(_log_path), encoding="utf-8", mode="w")
+    _file_handler.setLevel(logging.DEBUG)
+    _file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        "%Y-%m-%d %H:%M:%S",
+    ))
+    logging.getLogger('').addHandler(_file_handler)
+    logging.getLogger('').setLevel(logging.DEBUG)
+    logger.info("=== 程序启动 ===")
+
     app = QApplication(sys.argv)
 
     font = QFont("Microsoft YaHei UI", 10)

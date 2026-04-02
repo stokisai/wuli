@@ -5,6 +5,7 @@
 
 import oss2
 import os
+import sys
 import logging
 import configparser
 
@@ -14,8 +15,15 @@ logger = logging.getLogger(__name__)
 class OSSUploader:
     """阿里云 OSS 上传器"""
     
-    def __init__(self, config_path="config.ini"):
+    def __init__(self, config_path=None):
         self.config = configparser.ConfigParser()
+        if config_path is None:
+            # 自动定位 config.ini：优先 exe 同目录，其次源码目录
+            if getattr(sys, "frozen", False):
+                base_dir = os.path.dirname(sys.executable)
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            config_path = os.path.join(base_dir, "config.ini")
         self.config.read(config_path, encoding='utf-8')
         
         # 读取OSS配置
