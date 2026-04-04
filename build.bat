@@ -63,16 +63,20 @@ echo    Output: dist\图片处理工具\图片处理工具.exe
 echo ========================================
 echo.
 
-REM Copy runtime files
-echo Copying runtime files...
-copy "config.ini" "dist\" >nul
-copy "workflow_i2i.json" "dist\" >nul
-copy "credentials.json" "dist\" >nul 2>nul
-xcopy "fonts" "dist\fonts\" /E /I /Y >nul
-xcopy "styles" "dist\styles\" /E /I /Y >nul
-xcopy "templates" "dist\templates\" /E /I /Y >nul
+REM Copy runtime files INTO the app folder (not dist root!)
+REM This ensures the zip has a single top-level folder for OTA updater compatibility.
+set "APP_DIR=dist\图片处理工具"
+echo Copying runtime files to %APP_DIR% ...
+copy "config.ini" "%APP_DIR%\" >nul
+copy "workflow_i2i.json" "%APP_DIR%\" >nul
+copy "credentials.json" "%APP_DIR%\" >nul 2>nul
+xcopy "fonts" "%APP_DIR%\fonts\" /E /I /Y >nul
+xcopy "styles" "%APP_DIR%\styles\" /E /I /Y >nul
+xcopy "templates" "%APP_DIR%\templates\" /E /I /Y >nul
 
 echo.
-echo Done.
+echo Done. To create release zip, run:
+echo   cd dist ^&^& powershell Compress-Archive -Path '图片处理工具' -DestinationPath '..\wuli_vX.X.X.zip'
+echo.
 pause
 
